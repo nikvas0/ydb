@@ -183,6 +183,9 @@ private:
 
         YQL_ENSURE(SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable);
 
+        CA_LOG_D("Resolved SchemaVersion=" << SchemeEntry->TableId.SchemaVersion);
+        Y_ABORT_UNLESS(SchemeEntry->TableId.SchemaVersion != 0);
+
         CA_LOG_D("Resolved TableId=" << TableId);
 
         ProcessRows();
