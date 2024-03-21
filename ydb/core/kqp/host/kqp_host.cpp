@@ -1190,12 +1190,14 @@ private:
         }
 
         YQL_CLOG(INFO, ProviderKqp) << "Compiled query:\n" << KqpExprToPrettyString(*result, ctx);
+        Cerr << "Compiled query:\n" << KqpExprToPrettyString(*result, ctx) << Endl;
 
         if (Config->EnableCreateTableAs) {
             const auto results = RewriteExpression(result, ctx, *TypesCtx, SessionCtx, Cluster);
 
             for (const auto& resultPart : results) {
                 YQL_CLOG(INFO, ProviderKqp) << "Splitted Compiled query part:\n" << KqpExprToPrettyString(*resultPart, ctx);
+                Cerr << "Splitted Compiled query part:\n" << KqpExprToPrettyString(*resultPart, ctx) << Endl;
             }
 
             return results;
