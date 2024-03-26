@@ -345,6 +345,9 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
 
         case NKikimrSchemeOp::ESchemeOpAlterView:
             Y_ABORT("no implementation for ESchemeOpAlterView");
+
+        case NKikimrSchemeOp::ESchemeOpConsistentMoveTableAndResetTemporaryFlag:
+            Y_ABORT("no implementation for ESchemeOpConsistentMoveTableAndResetTemporaryFlag");
         }
     }
 
@@ -708,7 +711,8 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             }
             break;
         }
-        case NKikimrSchemeOp::ESchemeOpMoveTable: {
+        case NKikimrSchemeOp::ESchemeOpMoveTable:
+        case NKikimrSchemeOp::ESchemeOpConsistentMoveTableAndResetTemporaryFlag: {
             auto& descr = pbModifyScheme.GetMoveTable();
             {
                 auto toResolve = TPathToResolve(pbModifyScheme.GetOperationType());

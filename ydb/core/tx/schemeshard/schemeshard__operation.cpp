@@ -1305,6 +1305,9 @@ ISubOperation::TPtr TOperation::ConstructPart(NKikimrSchemeOp::EOperationType op
         return CreateDropView(NextPartId(), tx);
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterView:
         Y_ABORT("TODO: implement");
+
+    case NKikimrSchemeOp::EOperationType::ESchemeOpConsistentMoveTableAndResetTemporaryFlag:
+        Y_ABORT("in general, move table & reset temporary is multipart operation now due table indexes");
     }
 
     Y_UNREACHABLE();
@@ -1357,6 +1360,8 @@ TVector<ISubOperation::TPtr> TOperation::ConstructParts(const TTxTransaction& tx
         return CreateNewExternalDataSource(NextPartId(), tx, context);
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalTable:
         return CreateNewExternalTable(NextPartId(), tx, context);
+    case NKikimrSchemeOp::EOperationType::ESchemeOpConsistentMoveTableAndResetTemporaryFlag:
+        return CreateConsistentMoveTableAndResetTemporaryFlag(NextPartId(), tx, context);
     default:
         return {ConstructPart(opType, tx)};
     }

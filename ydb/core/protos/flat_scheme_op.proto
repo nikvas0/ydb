@@ -1466,6 +1466,9 @@ enum EOperationType {
     ESchemeOpCreateView = 93;
     ESchemeOpAlterView = 94;
     ESchemeOpDropView = 95;
+
+    // Rename & reset temporary
+    ESchemeOpConsistentMoveTableAndResetTemporaryFlag = 96;
 }
 
 message TApplyIf {

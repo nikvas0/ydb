@@ -13,7 +13,10 @@ namespace NSchemeShard {
 
 TVector<ISubOperation::TPtr> CreateConsistentMoveTable(TOperationId nextId, const TTxTransaction& tx, TOperationContext& context) {
     Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpMoveTable);
+    return CreateConsistentMoveTableImpl(nextId, tx, context);
+}
 
+TVector<ISubOperation::TPtr> CreateConsistentMoveTableImpl(TOperationId nextId, const TTxTransaction& tx, TOperationContext& context) {
     TVector<ISubOperation::TPtr> result;
 
     const auto& moving = tx.GetMoveTable();

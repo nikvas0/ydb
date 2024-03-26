@@ -644,7 +644,10 @@ ISubOperation::TPtr CreateFinalizeBuildIndexImplTable(TOperationId id, TTxState:
 
 TVector<ISubOperation::TPtr> CreateConsistentAlterTable(TOperationId id, const TTxTransaction& tx, TOperationContext& context) {
     Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpAlterTable);
+    return CreateConsistentAlterTableImpl(id, tx, context);
+}
 
+TVector<ISubOperation::TPtr> CreateConsistentAlterTableImpl(TOperationId id, const TTxTransaction& tx, TOperationContext& context) {
     auto alter = tx.GetAlterTable();
 
     const TString& parentPathStr = tx.GetWorkingDir();
@@ -699,7 +702,6 @@ TVector<ISubOperation::TPtr> CreateConsistentAlterTable(TOperationId id, const T
     }
 
     result.push_back(CreateAlterTable(NextPartId(id, result), tx));
-
 
     return result;
 }

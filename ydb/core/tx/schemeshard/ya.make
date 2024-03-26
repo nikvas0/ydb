@@ -144,6 +144,7 @@ SRCS(
     schemeshard__operation_move_index.cpp
     schemeshard__operation_move_table.cpp
     schemeshard__operation_move_tables.cpp
+    schemeshard__operation_move_table_and_reset_temporary.cpp
     schemeshard__operation_move_table_index.cpp
     schemeshard__operation_part.cpp
     schemeshard__operation_part.h

@@ -349,6 +349,7 @@ TVector<ISubOperation::TPtr> CreateCopyTable(TOperationId nextId, const TTxTrans
 ISubOperation::TPtr CreateAlterTable(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateAlterTable(TOperationId id, TTxState::ETxState state);
 TVector<ISubOperation::TPtr> CreateConsistentAlterTable(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
+TVector<ISubOperation::TPtr> CreateConsistentAlterTableImpl(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
 
 ISubOperation::TPtr CreateSplitMerge(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateSplitMerge(TOperationId id, TTxState::ETxState state);
@@ -570,7 +571,10 @@ ISubOperation::TPtr CreateAlterLogin(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateAlterLogin(TOperationId id, TTxState::ETxState state);
 
 TVector<ISubOperation::TPtr> CreateConsistentMoveTable(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
+TVector<ISubOperation::TPtr> CreateConsistentMoveTableImpl(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
 TVector<ISubOperation::TPtr> CreateConsistentMoveIndex(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
+
+TVector<ISubOperation::TPtr> CreateConsistentMoveTableAndResetTemporaryFlag(TOperationId nextId, const TTxTransaction& tx, TOperationContext& context);
 
 ISubOperation::TPtr CreateMoveTable(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateMoveTable(TOperationId id, TTxState::ETxState state);

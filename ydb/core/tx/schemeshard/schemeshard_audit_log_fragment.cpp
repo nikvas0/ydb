@@ -230,6 +230,8 @@ TString DefineUserOperationName(const NKikimrSchemeOp::TModifyScheme& tx) {
         return "ALTER VIEW";
     case NKikimrSchemeOp::EOperationType::ESchemeOpDropView:
         return "DROP VIEW";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpConsistentMoveTableAndResetTemporaryFlag:
+        return "ALTER TABLE RENAME; ALTER TABLE RESET TEMPORARY";
     }
     Y_ABORT("switch should cover all operation types");
 }
@@ -520,7 +522,10 @@ TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) 
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterView:
         // TODO: implement
         break;
-
+    case NKikimrSchemeOp::EOperationType::ESchemeOpConsistentMoveTableAndResetTemporaryFlag:
+        result.emplace_back(tx.GetMoveTable().GetSrcPath());
+        result.emplace_back(tx.GetMoveTable().GetDstPath());
+        break;
     }
 
     return result;
