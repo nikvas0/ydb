@@ -693,6 +693,14 @@ namespace {
         using TMethod = std::function<void(NYql::TModifyPermissionsSettings::EAction action, THashSet<TString>&& permissions, THashSet<TString>&& roles, TVector<TString>&& paths)>;
         TMethod ModifyPermissionsForPaths;
     };
+
+    TString GetTableName(const TString& path) {
+        auto splitPos = path.find_last_of('/');
+        if (splitPos == path.npos || splitPos + 1 == path.size()) {
+            ythrow yexception() << "wrong path format '" << path << "'" ;
+        }
+        return path.substr(splitPos + 1);
+    }
 }
 
 class TKikimrIcGateway : public IKqpGateway {
@@ -927,6 +935,48 @@ public:
 
         }
         catch (yexception& e) {
+            return MakeFuture(ResultFromException<TGenericResult>(e));
+        }
+    }
+
+    TFuture<TGenericResult> RenameTableAndResetTemporary(const TString& src, const TString& dst, const TString& cluster, const bool force) override {
+        Y_UNUSED(force);
+        using TRequest = TEvTxUserProxy::TEvProposeTransaction;
+
+        try {
+            if (!CheckCluster(cluster)) {
+                return InvalidCluster<TGenericResult>(cluster);
+            }
+
+            auto ev = MakeHolder<TRequest>();
+            ev->Record.SetDatabaseName(Database);
+            if (UserToken) {
+                ev->Record.SetUserToken(UserToken->GetSerializedToken());
+            }
+            auto& schemeTx = *ev->Record.MutableTransaction()->MutableModifyScheme();
+            schemeTx.SetOperationType(NKikimrSchemeOp::ESchemeOpConsistentMoveTableAndResetTemporaryFlag);
+
+            auto& alterOp = *schemeTx.MutableAlterTable();
+            alterOp.SetName(GetTableName(dst));
+            alterOp.SetTemporary(false);
+
+            auto& moveOp = *schemeTx.MutableMoveTable();
+            moveOp.SetSrcPath(src);
+            moveOp.SetDstPath(dst);
+
+            //ev->Record.MutableTransaction()->MutableModifyScheme()->Swap(&alterTableRequest);
+            //Ydb::Table::AlterTableRequest alterTableRequest;
+            //alterTableRequest.set_path(table.Metadata->Name);
+
+            auto movePromise = NewPromise<TGenericResult>();
+
+            SendSchemeRequest(ev.Release()).Apply(
+                [movePromise](const TFuture<TGenericResult>& future) mutable {
+                        movePromise.SetValue(future.GetValue());
+                });
+
+            return movePromise.GetFuture();
+        } catch (yexception& e) {
             return MakeFuture(ResultFromException<TGenericResult>(e));
         }
     }

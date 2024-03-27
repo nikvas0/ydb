@@ -849,6 +849,63 @@ public:
         return renameTablePromise.GetFuture();
     }
 
+    TString GetTableName(const TString& path) {
+        auto splitPos = path.find_last_of('/');
+        if (splitPos == path.npos || splitPos + 1 == path.size()) {
+            ythrow yexception() << "wrong path format '" << path << "'" ;
+        }
+        return path.substr(splitPos + 1);
+    }
+
+    TFuture<TGenericResult> RenameTableAndResetTemporary(const TString& src, const TString& dst, const TString& cluster, const bool force) override {
+        CHECK_PREPARED_DDL(RenameTable);
+
+        auto metadata = SessionCtx->Tables().GetTable(cluster, src).Metadata;
+
+        std::pair<TString, TString> pathPair;
+        TString error;
+        if (!NSchemeHelpers::SplitTablePath(metadata->Name, GetDatabase(), pathPair, error, false)) {
+            return MakeFuture(ResultFromError<TGenericResult>(error));
+        }
+
+        auto temporary = metadata->Temporary;
+        auto renameTablePromise = NewPromise<TGenericResult>();
+
+        NKikimrSchemeOp::TModifyScheme schemeTx;
+        schemeTx.SetOperationType(NKikimrSchemeOp::ESchemeOpConsistentMoveTableAndResetTemporaryFlag);
+        schemeTx.SetWorkingDir(pathPair.first);
+
+        auto& alterOp = *schemeTx.MutableAlterTable();
+        alterOp.SetName(GetTableName(dst));
+        alterOp.SetTemporary(false);
+
+        auto& renameTable = *schemeTx.MutableMoveTable();
+        renameTable.SetSrcPath(src);
+        renameTable.SetDstPath(dst);
+
+        if (IsPrepare()) {
+            auto& phyQuery = *SessionCtx->Query().PreparingQuery->MutablePhysicalQuery();
+            auto& phyTx = *phyQuery.AddTransactions();
+            phyTx.SetType(NKqpProto::TKqpPhyTx::TYPE_SCHEME);
+            phyTx.MutableSchemeOperation()->MutableAlterTable()->Swap(&schemeTx);
+            TGenericResult result;
+            result.SetSuccess();
+            renameTablePromise.SetValue(result);
+        } else {
+            if (temporary && !force) {
+                auto code = Ydb::StatusIds::BAD_REQUEST;
+                auto error = TStringBuilder() << "Not allowed to rename temp table";
+                IKqpGateway::TGenericResult errResult;
+                errResult.AddIssue(NYql::TIssue(error));
+                errResult.SetStatus(NYql::YqlStatusFromYdbStatus(code));
+                renameTablePromise.SetValue(errResult);
+            }
+            return Gateway->RenameTableAndResetTemporary(src, dst, cluster);
+        }
+
+        return renameTablePromise.GetFuture();
+    }
+
     TFuture<TGenericResult> DropTable(const TString& cluster, const TDropTableSettings& settings) override {
         CHECK_PREPARED_DDL(DropTable);
 

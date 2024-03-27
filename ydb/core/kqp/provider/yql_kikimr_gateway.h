@@ -809,6 +809,8 @@ public:
 
     virtual NThreading::TFuture<TGenericResult> RenameTable(const TString& src, const TString& dst, const TString& cluster, const bool force = false) = 0;
 
+    virtual NThreading::TFuture<TGenericResult> RenameTableAndResetTemporary(const TString& src, const TString& dst, const TString& cluster, const bool force = false) = 0;
+
     virtual NThreading::TFuture<TGenericResult> DropTable(const TString& cluster, const TDropTableSettings& settings) = 0;
 
     virtual NThreading::TFuture<TGenericResult> CreateTopic(const TString& cluster, Ydb::Topic::CreateTopicRequest&& request) = 0;

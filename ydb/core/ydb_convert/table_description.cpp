@@ -86,6 +86,7 @@ THashSet<EAlterOperationKind> GetAlterOperationKinds(const Ydb::Table::AlterTabl
 
 namespace {
 
+// TODO: move
 std::pair<TString, TString> SplitPathIntoWorkingDirAndName(const TString& path) {
     auto splitPos = path.find_last_of('/');
     if (splitPos == path.npos || splitPos + 1 == path.size()) {

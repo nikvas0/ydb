@@ -269,7 +269,7 @@ namespace {
                                 }),
                             }),
                             exprCtx.NewList(pos, {
-                                exprCtx.NewAtom(pos, "forceRenameTo"),
+                                exprCtx.NewAtom(pos, "publishTable"),
                                 exprCtx.NewAtom(pos, tableName),
                             }),
                         }),

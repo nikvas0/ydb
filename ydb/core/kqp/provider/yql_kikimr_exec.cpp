@@ -1074,9 +1074,18 @@ public:
 
             for (auto action : maybeAlter.Cast().Actions()) {
                 auto name = action.Name().Value();
-                if (name == "renameTo" || name == "forceRenameTo") {
+                if (name == "renameTo") {
                     auto destination = action.Value().Cast<TCoAtom>().StringValue();
                     auto future = Gateway->RenameTable(table.Metadata->Name, destination, cluster);
+                    return WrapFuture(future,
+                        [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
+                            Y_UNUSED(res);
+                            auto resultNode = ctx.NewWorld(input->Pos());
+                            return resultNode;
+                        });                    
+                } else if (name == "publishTable") {
+                    auto destination = action.Value().Cast<TCoAtom>().StringValue();
+                    auto future = Gateway->RenameTableAndResetTemporary(table.Metadata->Name, destination, cluster);
                     return WrapFuture(future,
                         [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
                             Y_UNUSED(res);
