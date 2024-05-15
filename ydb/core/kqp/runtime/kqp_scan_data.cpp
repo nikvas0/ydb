@@ -532,10 +532,15 @@ TKqpScanComputeContext::TScanData::TScanData(const NKikimrTxDataShard::TKqpTrans
     : TBase(meta)
 {
     switch(ReadTypeFromProto(meta.GetReadType())) {
-        case TKqpScanComputeContext::TScanData::EReadType::Rows:
+        case TKqpScanComputeContext::TScanData::EReadType::Rows: {
+            YQL_ENSURE(false, "Row actor used");
+            //Cerr << "CREATE::: >>>>>>>>>>>>>>>>> ROWS " << Endl;
             BatchReader.reset(new TRowBatchReader(meta));
             break;
+        }
         case TKqpScanComputeContext::TScanData::EReadType::Blocks:
+            //YQL_ENSURE(false, "Block actor used");
+            //Cerr << "CREATE::: >>>>>>>>>>>>>>>>> BLOCK " << Endl;
             BatchReader.reset(new TBlockBatchReader(meta));
             break;
     }
@@ -604,6 +609,7 @@ ui64 TKqpScanComputeContext::TScanData::AddData(const TVector<TOwnedCellVec>& ba
 TBytesStatistics TKqpScanComputeContext::TScanData::TRowBatchReader::AddData(const TBatchDataAccessor& batch, TMaybe<ui64> shardId,
     const THolderFactory& holderFactory)
 {
+    //Cerr << "TRowBatchReader::AddData " << Endl;
     TBytesStatistics stats;
     TUnboxedValueVector cells;
 
@@ -665,6 +671,7 @@ std::shared_ptr<arrow::Array> AdoptArrowTypeToYQL(const std::shared_ptr<arrow::A
 TBytesStatistics TKqpScanComputeContext::TScanData::TBlockBatchReader::AddData(const TBatchDataAccessor& dataAccessor, TMaybe<ui64> /*shardId*/,
     const THolderFactory& holderFactory)
 {
+    //Cerr << "TBlockBatchReader::AddData " << Endl;
     TBytesStatistics stats;
     auto totalColsCount = TotalColumnsCount + 1;
     auto batches = NArrow::SliceToRecordBatches(dataAccessor.GetFiltered());

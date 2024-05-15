@@ -916,6 +916,9 @@ void FillTaskMeta(const TStageInfo& stageInfo, const TTask& task, NYql::NDqProto
             if (task.Meta.HasEnableShardsSequentialScan()) {
                 protoTaskMeta.SetEnableShardsSequentialScan(task.Meta.GetEnableShardsSequentialScanUnsafe());
             }
+
+
+            LOG_DEBUG_S(*TlsActivationContext,  NKikimrServices::KQP_EXECUTER, "TEST <<< >>> ROWS = " << (task.Meta.ReadInfo.ReadType == TTaskMeta::TReadInfo::EReadType::Rows));
             protoTaskMeta.SetReadType(ReadTypeToProto(task.Meta.ReadInfo.ReadType));
 
             for (auto&& i : task.Meta.ReadInfo.GroupByColumnNames) {
