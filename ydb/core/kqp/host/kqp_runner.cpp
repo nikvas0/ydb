@@ -210,6 +210,8 @@ public:
                 YQL_ENSURE(false);
         }
 
+        TypesCtx.BlockEngineMode = NYql::EBlockEngineMode::Auto;
+
         return PrepareQueryInternal(cluster, TKiDataQueryBlocks(query), ctx, settings);
     }
 
