@@ -97,18 +97,23 @@ public:
         }
         PerStatementResult = perStatementResult && Config->EnablePerStatementQueryExecution;
 
+        Cerr << "COMPILE ACtor  " << PerStatementResult << " " << (SplitExpr == nullptr) << Endl;
+
         Config->FreezeDefaults();
     }
 
     void Bootstrap(const TActorContext& ctx) {
         switch(CompileAction) {
             case ECompileActorAction::PARSE:
+            Cerr << "PARSE" << Endl;
                 StartParsing(ctx);
                 break;
             case ECompileActorAction::COMPILE:
+            Cerr << "COMPILE" << Endl;
                 StartCompilation(ctx);
                 break;
             case ECompileActorAction::SPLIT:
+            Cerr << "SPLIT" << Endl;
                 StartSplitting(ctx);
                 break;
         }
@@ -176,6 +181,7 @@ private:
 
         const auto prepareSettings = PrepareCompilationSettings(ctx);
 
+        Cerr << "TRY SPLIT " << Endl;
         auto result = KqpHost->SplitQuery(QueryId.Text, prepareSettings);
 
         Become(&TKqpCompileActor::CompileState);

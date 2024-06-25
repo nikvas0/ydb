@@ -297,6 +297,9 @@ TVector<NYql::TExprNode::TPtr> RewriteExpression(
         NYql::TTypeAnnotationContext& typeCtx,
         const TIntrusivePtr<NYql::TKikimrSessionContext>& sessionCtx,
         const TString& cluster) {
+
+    Cerr << "REWRITE ::: " << NYql::NCommon::ExprToPrettyString(exprCtx, *root) << Endl;
+
     // CREATE TABLE AS statement can be used only with perstatement execution.
     // Thus we assume that there is only one such statement.
     TVector<NYql::TExprNode::TPtr> result;
@@ -318,6 +321,7 @@ TVector<NYql::TExprNode::TPtr> RewriteExpression(
     if (result.empty()) {
         result.push_back(root);
     }
+
     return result;
 }
 

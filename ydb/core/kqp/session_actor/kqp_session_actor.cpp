@@ -547,8 +547,11 @@ public:
         // outdated event from previous query.
         // ignoring that.
         if (ev->Cookie < QueryId) {
+            Cerr << "GOT COMPIlE: OUTDATED" << Endl;
             return;
         }
+
+        Cerr << "GOT COMPIle" << Endl;
 
         YQL_ENSURE(QueryState);
         TTimerGuard timer(this);
@@ -559,6 +562,7 @@ public:
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
 
             if (QueryState->CompileResult->NeedToSplit) {
+                Cerr << "NEED TO SPLIT" << Endl;
                 YQL_ENSURE(!QueryState->HasTxControl() && QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXECUTE);
                 auto ev = QueryState->BuildSplitRequest(CompilationCookie, GUCSettings);
                 Send(MakeKqpCompileServiceID(SelfId().NodeId()), ev.release(), 0, QueryState->QueryId,
@@ -1196,7 +1200,7 @@ public:
             }
 
             request.TopicOperations = std::move(txCtx.TopicOperations);
-        } else if (QueryState->ShouldAcquireLocks()) {
+        } else if (QueryState->ShouldAcquireLocks(tx)) {
             request.AcquireLocksTxId = txCtx.Locks.GetLockTxId();
 
             if (txCtx.HasUncommittedChangesRead || Config->FeatureFlags.GetEnableForceImmediateEffectsExecution()) {
