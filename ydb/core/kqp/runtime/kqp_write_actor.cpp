@@ -75,38 +75,42 @@ namespace {
     private:
         std::optional<NKikimrDataEvents::TLock> Lock;
     };
+
+    NKikimrDataEvents::TEvWrite::TOperation::EOperationType GetOperation(NKikimrKqp::TKqpTableSinkSettings::EType type) {
+        switch (type) {
+        case NKikimrKqp::TKqpTableSinkSettings::MODE_REPLACE:
+            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_REPLACE;
+        case NKikimrKqp::TKqpTableSinkSettings::MODE_UPSERT:
+            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT;
+        case NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT:
+            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_INSERT;
+        case NKikimrKqp::TKqpTableSinkSettings::MODE_DELETE:
+            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE;
+        case NKikimrKqp::TKqpTableSinkSettings::MODE_UPDATE:
+            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE;
+        default:
+            RuntimeError(
+                TStringBuilder() << "Unknown operation.",
+                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
+    }
 }
 
 
 namespace NKikimr {
 namespace NKqp {
 
-class TKqpDirectWriteActor : public TActorBootstrapped<TKqpDirectWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput {
-    using TBase = TActorBootstrapped<TKqpDirectWriteActor>;
+struct IKqpTableWriterCallbacks {
+    virtual void OnMemoryIncreased() = 0;
+    virtual void OnMemoryDecreased() = 0;
 
-    class TResumeNotificationManager {
-    public:
-        TResumeNotificationManager(TKqpDirectWriteActor& writer)
-            : Writer(writer) {
-            CheckMemory();
-        }
+    virtual void OnFinished() = 0;
 
-        void CheckMemory() {
-            const auto freeSpace = Writer.GetFreeSpace();
-            const auto targetMemory = Writer.MemoryLimit / 2;
-            if (freeSpace >= targetMemory && targetMemory > LastFreeMemory) {
-                YQL_ENSURE(freeSpace > 0);
-                Writer.ResumeExecution();
-            }
-            LastFreeMemory = freeSpace;
-        }
+    virtual void OnUpdateStatistics() = 0;
+};
 
-    private:
-        TKqpDirectWriteActor& Writer;
-        i64 LastFreeMemory = std::numeric_limits<i64>::max();
-    };
-
-    friend class TResumeNotificationManager;
+class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
+    using TBase = TActorBootstrapped<TKqpTableWriteActor>;
 
     struct TEvPrivate {
         enum EEv {
@@ -127,84 +131,11 @@ class TKqpDirectWriteActor : public TActorBootstrapped<TKqpDirectWriteActor>, pu
     };
 
 public:
-    TKqpDirectWriteActor(
-        NKikimrKqp::TKqpTableSinkSettings&& settings,
-        NYql::NDq::TDqAsyncIoFactory::TSinkArguments&& args,
-        TIntrusivePtr<TKqpCounters> counters)
-        : LogPrefix(TStringBuilder() << "TxId: " << args.TxId << ", task: " << args.TaskId << ". ")
-        , Settings(std::move(settings))
-        , OutputIndex(args.OutputIndex)
-        , Callbacks(args.Callback)
-        , Counters(counters)
-        , TypeEnv(args.TypeEnv)
-        , Alloc(args.Alloc)
-        , TxId(args.TxId)
-        , TableId(
-            Settings.GetTable().GetOwnerId(),
-            Settings.GetTable().GetTableId(),
-            Settings.GetTable().GetVersion())
-        , FinalTx(
-            Settings.GetFinalTx())
-        , ImmediateTx(
-            Settings.GetImmediateTx())
-        , InconsistentTx(
-            Settings.GetInconsistentTx())
-    {
-        YQL_ENSURE(std::holds_alternative<ui64>(TxId));
-        YQL_ENSURE(!ImmediateTx);
-        EgressStats.Level = args.StatsLevel;
+    i64 GetFreeSpace() const {
+        return ShardedWriteController->GetMemory();
     }
 
-    void Bootstrap() {
-        LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
-        ResolveTable();
-        Become(&TKqpDirectWriteActor::StateFunc);
-    }
-
-    static constexpr char ActorName[] = "KQP_WRITE_ACTOR";
-
-private:
-    virtual ~TKqpDirectWriteActor() {
-    }
-
-    void CommitState(const NYql::NDqProto::TCheckpoint&) final {};
-    void LoadState(const NYql::NDq::TSinkState&) final {};
-
-    ui64 GetOutputIndex() const final {
-        return OutputIndex;
-    }
-
-    const NYql::NDq::TDqAsyncStats& GetEgressStats() const final {
-        return EgressStats;
-    }
-
-    i64 GetFreeSpace() const final {
-        const i64 result = (ShardedWriteController && !IsResolving())
-            ? MemoryLimit - ShardedWriteController->GetMemory()
-            : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
-        return result;
-    }
-
-    TMaybe<google::protobuf::Any> ExtraData() override {
-        NKikimrKqp::TEvKqpOutputActorResultInfo resultInfo;
-        for (const auto& [_, lockInfo] : LocksInfo) {
-            if (const auto& lock = lockInfo.GetLock(); lock) {
-                resultInfo.AddLocks()->CopyFrom(*lock);
-            }
-        }
-        google::protobuf::Any result;
-        result.PackFrom(resultInfo);
-        return result;
-    }
-
-    void SendData(NMiniKQL::TUnboxedValueBatch&& data, i64 size, const TMaybe<NYql::NDqProto::TCheckpoint>&, bool finished) final {
-        YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
-        YQL_ENSURE(!Finished);
-        Finished = finished;
-        EgressStats.Resume();
-
-        CA_LOG_D("New data: size=" << size << ", finished=" << finished << ", used memory=" << ShardedWriteController->GetMemory() << ".");
-
+    void AddData(NMiniKQL::TUnboxedValueBatch&& data) {
         YQL_ENSURE(ShardedWriteController);
         try {
             ShardedWriteController->AddData(std::move(data));
@@ -219,6 +150,15 @@ private:
         ProcessBatches();
     }
 
+    const THashMap<ui64, TLockInfo>& GetLocks() const {
+        return LocksInfo;
+    }
+
+    size_t GetShardsCount() const {
+        return 2;
+    }
+
+private:
     STFUNC(StateFunc) {
         try {
             switch (ev->GetTypeRewrite()) {
@@ -226,7 +166,6 @@ private:
                 hFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
                 hFunc(TEvTxProxySchemeCache::TEvResolveKeySetResult, Handle);
                 hFunc(TEvPipeCache::TEvDeliveryProblem, Handle);
-                IgnoreFunc(TEvTxUserProxy::TEvAllocateTxIdResult);
                 hFunc(TEvPrivate::TEvShardRequestTimeout, Handle);
                 IgnoreFunc(TEvInterconnect::TEvNodeConnected);
                 IgnoreFunc(TEvTxProxySchemeCache::TEvInvalidateTableResult);
@@ -501,6 +440,186 @@ private:
         ProcessBatches();
     }
 
+
+    NActors::TActorId TxProxyId = MakeTxProxyID();
+    NActors::TActorId PipeCacheId = NKikimr::MakePipePerNodeCacheID(false);
+
+    TString LogPrefix;
+    const NMiniKQL::TTypeEnvironment& TypeEnv;
+
+    const ui64 TxId;
+    const TTableId TableId;
+    const bool InconsistentTx;
+
+    const IKqpTableWriterCallbacks* Callbacks = nullptr;
+
+    std::optional<NSchemeCache::TSchemeCacheNavigate::TEntry> SchemeEntry;
+    std::optional<NSchemeCache::TSchemeCacheRequest::TEntry> SchemeRequest;
+    ui64 ResolveAttempts = 0;
+
+    THashMap<ui64, TLockInfo> LocksInfo;
+    bool Finished = false;
+
+    IShardedWriteControllerPtr ShardedWriteController = nullptr;
+};
+
+class TKqpDirectWriteActor : public TActorBootstrapped<TKqpDirectWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput {
+    using TBase = TActorBootstrapped<TKqpDirectWriteActor>;
+
+    class TResumeNotificationManager {
+    public:
+        TResumeNotificationManager(TKqpDirectWriteActor& writer)
+            : Writer(writer) {
+            CheckMemory();
+        }
+
+        void CheckMemory() {
+            const auto freeSpace = Writer.GetFreeSpace();
+            const auto targetMemory = Writer.MemoryLimit / 2;
+            if (freeSpace >= targetMemory && targetMemory > LastFreeMemory) {
+                YQL_ENSURE(freeSpace > 0);
+                Writer.ResumeExecution();
+            }
+            LastFreeMemory = freeSpace;
+        }
+
+    private:
+        TKqpDirectWriteActor& Writer;
+        i64 LastFreeMemory = std::numeric_limits<i64>::max();
+    };
+
+    friend class TResumeNotificationManager;
+
+    struct TEvPrivate {
+        enum EEv {
+            EvShardRequestTimeout = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
+            EvResolveRequestPlanned,
+        };
+
+        struct TEvShardRequestTimeout : public TEventLocal<TEvShardRequestTimeout, EvShardRequestTimeout> {
+            ui64 ShardId;
+
+            TEvShardRequestTimeout(ui64 shardId)
+                : ShardId(shardId) {
+            }
+        };
+
+        struct TEvResolveRequestPlanned : public TEventLocal<TEvResolveRequestPlanned, EvResolveRequestPlanned> {
+        };
+    };
+
+public:
+    TKqpDirectWriteActor(
+        NKikimrKqp::TKqpTableSinkSettings&& settings,
+        NYql::NDq::TDqAsyncIoFactory::TSinkArguments&& args,
+        TIntrusivePtr<TKqpCounters> counters)
+        : LogPrefix(TStringBuilder() << "TxId: " << args.TxId << ", task: " << args.TaskId << ". ")
+        , Settings(std::move(settings))
+        , OutputIndex(args.OutputIndex)
+        , Callbacks(args.Callback)
+        , Counters(counters)
+        , TypeEnv(args.TypeEnv)
+        , Alloc(args.Alloc)
+        , TxId(args.TxId)
+        , TableId(
+            Settings.GetTable().GetOwnerId(),
+            Settings.GetTable().GetTableId(),
+            Settings.GetTable().GetVersion())
+        , FinalTx(
+            Settings.GetFinalTx())
+        , ImmediateTx(
+            Settings.GetImmediateTx())
+        , InconsistentTx(
+            Settings.GetInconsistentTx())
+    {
+        YQL_ENSURE(std::holds_alternative<ui64>(TxId));
+        YQL_ENSURE(!ImmediateTx);
+        EgressStats.Level = args.StatsLevel;
+    }
+
+    void Bootstrap() {
+        LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+        ResolveTable();
+        Become(&TKqpDirectWriteActor::StateFunc);
+    }
+
+    static constexpr char ActorName[] = "KQP_WRITE_ACTOR";
+
+private:
+    virtual ~TKqpDirectWriteActor() {
+    }
+
+    void CommitState(const NYql::NDqProto::TCheckpoint&) final {};
+    void LoadState(const NYql::NDq::TSinkState&) final {};
+
+    ui64 GetOutputIndex() const final {
+        return OutputIndex;
+    }
+
+    const NYql::NDq::TDqAsyncStats& GetEgressStats() const final {
+        return EgressStats;
+    }
+
+    i64 GetFreeSpace() const final {
+        const i64 result = (ShardedWriteController && !IsResolving())
+            ? MemoryLimit - ShardedWriteController->GetMemory()
+            : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
+        return result;
+    }
+
+    TMaybe<google::protobuf::Any> ExtraData() override {
+        NKikimrKqp::TEvKqpOutputActorResultInfo resultInfo;
+        for (const auto& [_, lockInfo] : LocksInfo) {
+            if (const auto& lock = lockInfo.GetLock(); lock) {
+                resultInfo.AddLocks()->CopyFrom(*lock);
+            }
+        }
+        google::protobuf::Any result;
+        result.PackFrom(resultInfo);
+        return result;
+    }
+
+    void SendData(NMiniKQL::TUnboxedValueBatch&& data, i64 size, const TMaybe<NYql::NDqProto::TCheckpoint>&, bool finished) final {
+        YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
+        YQL_ENSURE(!Finished);
+        Finished = finished;
+        EgressStats.Resume();
+
+        CA_LOG_D("New data: size=" << size << ", finished=" << finished << ", used memory=" << ShardedWriteController->GetMemory() << ".");
+
+        YQL_ENSURE(ShardedWriteController);
+        try {
+            ShardedWriteController->AddData(std::move(data));
+            if (Finished) {
+                ShardedWriteController->Close();
+            }
+        } catch (...) {
+            RuntimeError(
+                CurrentExceptionMessage(),
+                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
+        ProcessBatches();
+    }
+
+    STFUNC(StateFunc) {
+        try {
+            switch (ev->GetTypeRewrite()) {
+                hFunc(NKikimr::NEvents::TDataEvents::TEvWriteResult, Handle);
+                hFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
+                hFunc(TEvTxProxySchemeCache::TEvResolveKeySetResult, Handle);
+                hFunc(TEvPipeCache::TEvDeliveryProblem, Handle);
+                IgnoreFunc(TEvTxUserProxy::TEvAllocateTxIdResult);
+                hFunc(TEvPrivate::TEvShardRequestTimeout, Handle);
+                IgnoreFunc(TEvInterconnect::TEvNodeConnected);
+                IgnoreFunc(TEvTxProxySchemeCache::TEvInvalidateTableResult);
+            }
+        } catch (const yexception& e) {
+            RuntimeError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
+    }
+
+   
+
     void OnMessageAcknowledged(ui64 shardId, ui64 cookie) {
         TResumeNotificationManager resumeNotificator(*this);
         const auto removedDataSize = ShardedWriteController->OnMessageAcknowledged(shardId, cookie);
@@ -569,7 +688,7 @@ private:
 
         for (size_t payloadIndex : serializationResult.PayloadIndexes) {
             evWrite->AddOperation(
-                GetOperation(),
+                GetOperation(Settings.GetType()),
                 {
                     Settings.GetTable().GetOwnerId(),
                     Settings.GetTable().GetTableId(),
@@ -602,25 +721,6 @@ private:
                     new TEvPrivate::TEvShardRequestTimeout(shardId),
                     0,
                     metadata->Cookie));
-        }
-    }
-
-    NKikimrDataEvents::TEvWrite::TOperation::EOperationType GetOperation() {
-        switch (Settings.GetType()) {
-        case NKikimrKqp::TKqpTableSinkSettings::MODE_REPLACE:
-            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_REPLACE;
-        case NKikimrKqp::TKqpTableSinkSettings::MODE_UPSERT:
-            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT;
-        case NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT:
-            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_INSERT;
-        case NKikimrKqp::TKqpTableSinkSettings::MODE_DELETE:
-            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE;
-        case NKikimrKqp::TKqpTableSinkSettings::MODE_UPDATE:
-            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE;
-        default:
-            RuntimeError(
-                TStringBuilder() << "Unknown operation.",
-                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
     }
 
