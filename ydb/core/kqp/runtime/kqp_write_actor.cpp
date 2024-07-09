@@ -14,7 +14,6 @@
 #include <ydb/core/tx/data_events/payload_helper.h>
 #include <ydb/core/tx/data_events/shards_splitter.h>
 #include <ydb/core/tx/scheme_cache/scheme_cache.h>
-#include <ydb/core/tx/tx_proxy/proxy.h>
 #include <ydb/core/tx/tx.h>
 #include <ydb/library/actors/core/actorsystem.h>
 #include <ydb/library/actors/core/interconnect.h>
@@ -89,9 +88,7 @@ namespace {
         case NKikimrKqp::TKqpTableSinkSettings::MODE_UPDATE:
             return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE;
         default:
-            RuntimeError(
-                TStringBuilder() << "Unknown operation.",
-                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+            return NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UNSPECIFIED;
         }
     }
 }
@@ -101,12 +98,15 @@ namespace NKikimr {
 namespace NKqp {
 
 struct IKqpTableWriterCallbacks {
-    virtual void OnMemoryIncreased() = 0;
-    virtual void OnMemoryDecreased() = 0;
+    virtual void OnMemoryUpdated() = 0;
+
+    virtual i64 GetTotalFreeSpace() = 0;
 
     virtual void OnFinished() = 0;
 
-    virtual void OnUpdateStatistics() = 0;
+    virtual void OnMessageAcknowledged(ui64 dataSize) = 0;
+
+    virtual void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) = 0;
 };
 
 class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
@@ -131,11 +131,53 @@ class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
     };
 
 public:
-    i64 GetFreeSpace() const {
-        return ShardedWriteController->GetMemory();
+    TKqpTableWriteActor(
+        const NKikimrKqp::TKqpTableSinkSettings& settings, // TODO: delete it
+        IKqpTableWriterCallbacks* callbacks,
+        TTableId tableId,
+        ui64 txId,
+        ui64 taskId,
+        const NMiniKQL::TTypeEnvironment& typeEnv,
+        std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc)
+        : LogPrefix(TStringBuilder() << "TxId: " << txId << ", task: " << taskId << ". ")
+        , Settings(settings)
+        , TypeEnv(typeEnv)
+        , Alloc(alloc)
+        , TxId(txId)
+        , TableId(tableId)
+        , Callbacks(callbacks)
+    {
     }
 
-    void AddData(NMiniKQL::TUnboxedValueBatch&& data) {
+    void Bootstrap() {
+        LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+        ResolveTable();
+        Become(&TKqpTableWriteActor::StateFunc);
+    }
+
+    static constexpr char ActorName[] = "KQP_TABLE_WRITE_ACTOR";
+
+    i64 GetMemory() const {
+        return IsReady()
+            ? ShardedWriteController->GetMemory()
+            : 0;
+    }
+
+    bool IsReady() const {
+        return ShardedWriteController != nullptr;
+    }
+
+    const THashMap<ui64, TLockInfo>& GetLocks() const {
+        return LocksInfo;
+    }
+
+    //size_t GetShardsCount() const {
+
+    void AddData(NMiniKQL::TUnboxedValueBatch&& data, bool finished) {
+        YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
+        YQL_ENSURE(!Finished);
+        Finished = finished;
+
         YQL_ENSURE(ShardedWriteController);
         try {
             ShardedWriteController->AddData(std::move(data));
@@ -147,18 +189,11 @@ public:
                 CurrentExceptionMessage(),
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
+
+        Callbacks->OnMemoryUpdated();
         ProcessBatches();
     }
 
-    const THashMap<ui64, TLockInfo>& GetLocks() const {
-        return LocksInfo;
-    }
-
-    size_t GetShardsCount() const {
-        return 2;
-    }
-
-private:
     STFUNC(StateFunc) {
         try {
             switch (ev->GetTypeRewrite()) {
@@ -239,7 +274,7 @@ private:
         }
 
         if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
-            YQL_ENSURE(!ImmediateTx);
+            //YQL_ENSURE(!ImmediateTx);
             Prepare();
         } else {
             ResolveShards();
@@ -247,7 +282,7 @@ private:
     }
 
     void ResolveShards() {
-        YQL_ENSURE(!SchemeRequest || InconsistentTx);
+        YQL_ENSURE(!SchemeRequest || Settings.GetInconsistentTx());
         YQL_ENSURE(SchemeEntry);
         CA_LOG_D("Resolve shards for TableId=" << TableId);
 
@@ -276,7 +311,7 @@ private:
     }
 
     void Handle(TEvTxProxySchemeCache::TEvResolveKeySetResult::TPtr& ev) {
-        YQL_ENSURE(!SchemeRequest || InconsistentTx);
+        YQL_ENSURE(!SchemeRequest || Settings.GetInconsistentTx());
         auto* request = ev->Get()->Request.Get();
 
         if (request->ErrorCount > 0) {
@@ -397,7 +432,7 @@ private:
                     << " ShardID=" << ev->Get()->Record.GetOrigin() << ","
                     << " Sink=" << this->SelfId() << "."
                     << getIssues().ToOneLineString());
-            if (InconsistentTx) {
+            if (Settings.GetInconsistentTx()) {
                 ResetShardRetries(ev->Get()->Record.GetOrigin(), ev->Cookie);
                 RetryResolveTable();
             } else {
@@ -440,18 +475,211 @@ private:
         ProcessBatches();
     }
 
+    void OnMessageAcknowledged(ui64 shardId, ui64 cookie) {
+        const auto removedDataSize = ShardedWriteController->OnMessageAcknowledged(shardId, cookie);
+        if (removedDataSize) {
+            //EgressStats.Bytes += *removedDataSize;
+            //EgressStats.Chunks++;
+            //EgressStats.Splits++;
+            //EgressStats.Resume();
+            Callbacks->OnMessageAcknowledged(*removedDataSize);
+        }
+        Callbacks->OnMemoryUpdated();
+    }
 
-    NActors::TActorId TxProxyId = MakeTxProxyID();
+    void ProcessBatches() {
+        if (/*!ImmediateTx ||*/ Finished || Callbacks->GetTotalFreeSpace() <= 0) {
+            SendBatchesToShards();
+        }
+
+        if (Finished && ShardedWriteController->IsFinished()) {
+            CA_LOG_D("Write actor finished");
+            Callbacks->OnFinished();
+        }
+    }
+
+    void SendBatchesToShards() {
+        for (const size_t shardId : ShardedWriteController->GetPendingShards()) {
+            SendDataToShard(shardId);
+        }
+    }
+
+    void SendDataToShard(const ui64 shardId) {
+        const auto metadata = ShardedWriteController->GetMessageMetadata(shardId);
+        YQL_ENSURE(metadata);
+        if (metadata->SendAttempts >= BackoffSettings()->MaxWriteAttempts) {
+            CA_LOG_E("ShardId=" << shardId
+                    << " for table '" << Settings.GetTable().GetPath()
+                    << "': retry limit exceeded."
+                    << " Sink=" << this->SelfId() << ".");
+            RuntimeError(
+                TStringBuilder()
+                    << "ShardId=" << shardId
+                    << " for table '" << Settings.GetTable().GetPath()
+                    << "': retry limit exceeded.",
+                NYql::NDqProto::StatusIds::UNAVAILABLE);
+            return;
+        }
+
+        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(
+            NKikimrDataEvents::TEvWrite::MODE_IMMEDIATE);
+        
+        if (/*ImmediateTx && FinalTx &&*/ Finished && metadata->IsFinal) {
+            // Last immediate write (only for datashard)
+            if (LocksInfo[shardId].GetLock()) {
+                // multi immediate evwrite
+                auto* locks = evWrite->Record.MutableLocks();
+                locks->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
+                locks->AddSendingShards(shardId);
+                locks->AddReceivingShards(shardId);
+                *locks->AddLocks() = *LocksInfo.at(shardId).GetLock();
+            }
+        } else if (!Settings.GetInconsistentTx()) {
+            evWrite->SetLockId(Settings.GetLockTxId(), Settings.GetLockNodeId());
+        }
+
+        const auto serializationResult = ShardedWriteController->SerializeMessageToPayload(shardId, *evWrite);
+        YQL_ENSURE(serializationResult.TotalDataSize > 0);
+
+        for (size_t payloadIndex : serializationResult.PayloadIndexes) {
+            evWrite->AddOperation(
+                GetOperation(Settings.GetType()),
+                {
+                    Settings.GetTable().GetOwnerId(),
+                    Settings.GetTable().GetTableId(),
+                    Settings.GetTable().GetVersion(),
+                },
+                ShardedWriteController->GetWriteColumnIds(),
+                payloadIndex,
+                ShardedWriteController->GetDataFormat());
+        }
+
+        CA_LOG_D("Send EvWrite to ShardID=" << shardId << ", TxId=" << TxId
+            << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
+            << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
+            << ", Operations=" << metadata->OperationsCount << ", IsFinal=" << metadata->IsFinal
+            << ", Attempts=" << metadata->SendAttempts);
+        Send(
+            PipeCacheId,
+            new TEvPipeCache::TEvForward(evWrite.release(), shardId, true),
+            0,
+            metadata->Cookie);
+
+        ShardedWriteController->OnMessageSent(shardId, metadata->Cookie);
+
+        if (Settings.GetInconsistentTx()) {
+            TlsActivationContext->Schedule(
+                CalculateNextAttemptDelay(metadata->SendAttempts),
+                new IEventHandle(
+                    SelfId(),
+                    SelfId(),
+                    new TEvPrivate::TEvShardRequestTimeout(shardId),
+                    0,
+                    metadata->Cookie));
+        }
+    }
+
+    void RetryShard(const ui64 shardId, const std::optional<ui64> ifCookieEqual) {
+        const auto metadata = ShardedWriteController->GetMessageMetadata(shardId);
+        if (!metadata || (ifCookieEqual && metadata->Cookie != ifCookieEqual)) {
+            CA_LOG_D("Retry failed: not found ShardID=" << shardId << " with Cookie=" << ifCookieEqual.value_or(0));
+            return;
+        }
+
+        CA_LOG_D("Retry ShardID=" << shardId << " with Cookie=" << ifCookieEqual.value_or(0));
+        SendDataToShard(shardId);
+    }
+
+    void ResetShardRetries(const ui64 shardId, const ui64 cookie) {
+        ShardedWriteController->ResetRetries(shardId, cookie);
+    }
+
+    void Handle(TEvPrivate::TEvShardRequestTimeout::TPtr& ev) {
+        CA_LOG_W("Timeout shardID=" << ev->Get()->ShardId);
+        YQL_ENSURE(Settings.GetInconsistentTx());
+        RetryShard(ev->Get()->ShardId, ev->Cookie);
+    }
+
+    void Handle(TEvPipeCache::TEvDeliveryProblem::TPtr& ev) {
+        CA_LOG_W("TEvDeliveryProblem was received from tablet: " << ev->Get()->TabletId);
+        if (Settings.GetInconsistentTx()) {
+            RetryShard(ev->Get()->TabletId, std::nullopt);
+        } else {
+            RuntimeError(
+                TStringBuilder() << "Error while delivering message to tablet " << ev->Get()->TabletId,
+                NYql::NDqProto::StatusIds::UNAVAILABLE);
+        }
+    }
+
+    void Prepare() {
+        YQL_ENSURE(SchemeEntry);
+        ResolveAttempts = 0;
+
+        if (!ShardedWriteController) {
+            TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+            columnsMetadata.reserve(Settings.GetColumns().size());
+            for (const auto & column : Settings.GetColumns()) {
+                columnsMetadata.push_back(column);
+            }
+
+            try {
+                ShardedWriteController = CreateShardedWriteController(
+                    TShardedWriteControllerSettings {
+                        .MemoryLimitTotal = kInFlightMemoryLimitPerActor,
+                        .MemoryLimitPerMessage = kMemoryLimitPerMessage,
+                        .MaxBatchesPerMessage = (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable
+                            ? 1
+                            : kMaxBatchesPerMessage),
+                    },
+                    std::move(columnsMetadata),
+                    TypeEnv,
+                    Alloc);
+            } catch (...) {
+                RuntimeError(
+                    CurrentExceptionMessage(),
+                    NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+            }
+        }
+
+        try {
+            if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
+                ShardedWriteController->OnPartitioningChanged(*SchemeEntry);
+            } else {
+                ShardedWriteController->OnPartitioningChanged(*SchemeEntry, std::move(*SchemeRequest));
+            }
+        } catch (...) {
+            RuntimeError(
+                CurrentExceptionMessage(),
+                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
+        Callbacks->OnMemoryUpdated();
+        ProcessBatches();
+    }
+
+    void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {}) {
+        Callbacks->OnError(message, statusCode, subIssues);
+    }
+
+    void PassAway() override {;
+        Send(PipeCacheId, new TEvPipeCache::TEvUnlink(0));
+        TActorBootstrapped<TKqpTableWriteActor>::PassAway();
+    }
+
+    void Terminate() {
+        PassAway();
+    }
+
     NActors::TActorId PipeCacheId = NKikimr::MakePipePerNodeCacheID(false);
 
     TString LogPrefix;
+    const NKikimrKqp::TKqpTableSinkSettings& Settings;
     const NMiniKQL::TTypeEnvironment& TypeEnv;
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
     const ui64 TxId;
     const TTableId TableId;
-    const bool InconsistentTx;
 
-    const IKqpTableWriterCallbacks* Callbacks = nullptr;
+    IKqpTableWriterCallbacks* Callbacks;
 
     std::optional<NSchemeCache::TSchemeCacheNavigate::TEntry> SchemeEntry;
     std::optional<NSchemeCache::TSchemeCacheRequest::TEntry> SchemeRequest;
@@ -463,7 +691,7 @@ private:
     IShardedWriteControllerPtr ShardedWriteController = nullptr;
 };
 
-class TKqpDirectWriteActor : public TActorBootstrapped<TKqpDirectWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput {
+class TKqpDirectWriteActor : public TActorBootstrapped<TKqpDirectWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpDirectWriteActor>;
 
     class TResumeNotificationManager {
@@ -520,30 +748,35 @@ public:
         , Counters(counters)
         , TypeEnv(args.TypeEnv)
         , Alloc(args.Alloc)
-        , TxId(args.TxId)
+        , TxId(std::get<ui64>(args.TxId))
+        , TaskId(args.TaskId)
+        //, InconsistentTx(false)
         , TableId(
             Settings.GetTable().GetOwnerId(),
             Settings.GetTable().GetTableId(),
             Settings.GetTable().GetVersion())
-        , FinalTx(
-            Settings.GetFinalTx())
-        , ImmediateTx(
-            Settings.GetImmediateTx())
-        , InconsistentTx(
-            Settings.GetInconsistentTx())
     {
-        YQL_ENSURE(std::holds_alternative<ui64>(TxId));
-        YQL_ENSURE(!ImmediateTx);
         EgressStats.Level = args.StatsLevel;
     }
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
-        ResolveTable();
+        WriteTableActor = new TKqpTableWriteActor(
+            Settings,
+            this,
+            TableId,
+            TxId,
+            TaskId,
+            TypeEnv,
+            Alloc);
+
+        WriteTableActorId = RegisterWithSameMailbox(WriteTableActor);
+        Y_UNUSED(WriteTableActorId);
+
         Become(&TKqpDirectWriteActor::StateFunc);
     }
 
-    static constexpr char ActorName[] = "KQP_WRITE_ACTOR";
+    static constexpr char ActorName[] = "KQP_DIRECT_WRITE_ACTOR";
 
 private:
     virtual ~TKqpDirectWriteActor() {
@@ -561,19 +794,21 @@ private:
     }
 
     i64 GetFreeSpace() const final {
-        const i64 result = (ShardedWriteController && !IsResolving())
-            ? MemoryLimit - ShardedWriteController->GetMemory()
-            : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
-        return result;
+        //const i64 result = (ShardedWriteController && !IsResolving())
+        //    ? MemoryLimit - ShardedWriteController->GetMemory()
+        //    : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
+        //return result;
+        return 0;
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
         NKikimrKqp::TEvKqpOutputActorResultInfo resultInfo;
-        for (const auto& [_, lockInfo] : LocksInfo) {
-            if (const auto& lock = lockInfo.GetLock(); lock) {
-                resultInfo.AddLocks()->CopyFrom(*lock);
-            }
-        }
+        //for (const auto& [_, lockInfo] : LocksInfo) {
+        //    if (const auto& lock = lockInfo.GetLock(); lock) {
+        //        resultInfo.AddLocks()->CopyFrom(*lock);
+        //    }
+        //}
+        
         google::protobuf::Any result;
         result.PackFrom(resultInfo);
         return result;
@@ -584,175 +819,23 @@ private:
         YQL_ENSURE(!Finished);
         Finished = finished;
         EgressStats.Resume();
-
-        CA_LOG_D("New data: size=" << size << ", finished=" << finished << ", used memory=" << ShardedWriteController->GetMemory() << ".");
-
-        YQL_ENSURE(ShardedWriteController);
-        try {
-            ShardedWriteController->AddData(std::move(data));
-            if (Finished) {
-                ShardedWriteController->Close();
-            }
-        } catch (...) {
-            RuntimeError(
-                CurrentExceptionMessage(),
-                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
-        }
-        ProcessBatches();
+        Y_UNUSED(size);
     }
 
     STFUNC(StateFunc) {
         try {
             switch (ev->GetTypeRewrite()) {
-                hFunc(NKikimr::NEvents::TDataEvents::TEvWriteResult, Handle);
-                hFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
-                hFunc(TEvTxProxySchemeCache::TEvResolveKeySetResult, Handle);
-                hFunc(TEvPipeCache::TEvDeliveryProblem, Handle);
-                IgnoreFunc(TEvTxUserProxy::TEvAllocateTxIdResult);
-                hFunc(TEvPrivate::TEvShardRequestTimeout, Handle);
+                //hFunc(NKikimr::NEvents::TDataEvents::TEvWriteResult, Handle);
+                //hFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
+                //hFunc(TEvTxProxySchemeCache::TEvResolveKeySetResult, Handle);
+                //hFunc(TEvPipeCache::TEvDeliveryProblem, Handle);
+                //IgnoreFunc(TEvTxUserProxy::TEvAllocateTxIdResult);
+                //hFunc(TEvPrivate::TEvShardRequestTimeout, Handle);
                 IgnoreFunc(TEvInterconnect::TEvNodeConnected);
                 IgnoreFunc(TEvTxProxySchemeCache::TEvInvalidateTableResult);
             }
         } catch (const yexception& e) {
             RuntimeError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR);
-        }
-    }
-
-   
-
-    void OnMessageAcknowledged(ui64 shardId, ui64 cookie) {
-        TResumeNotificationManager resumeNotificator(*this);
-        const auto removedDataSize = ShardedWriteController->OnMessageAcknowledged(shardId, cookie);
-        if (removedDataSize) {
-            EgressStats.Bytes += *removedDataSize;
-            EgressStats.Chunks++;
-            EgressStats.Splits++;
-            EgressStats.Resume();
-        }
-        resumeNotificator.CheckMemory();
-    }
-
-    void ProcessBatches() {
-        if (!ImmediateTx || Finished || GetFreeSpace() <= 0) {
-            SendBatchesToShards();
-        }
-
-        if (Finished && ShardedWriteController->IsFinished()) {
-            CA_LOG_D("Write actor finished");
-            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
-        }
-    }
-
-    void SendBatchesToShards() {
-        for (const size_t shardId : ShardedWriteController->GetPendingShards()) {
-            SendDataToShard(shardId);
-        }
-    }
-
-    void SendDataToShard(const ui64 shardId) {
-        const auto metadata = ShardedWriteController->GetMessageMetadata(shardId);
-        YQL_ENSURE(metadata);
-        if (metadata->SendAttempts >= BackoffSettings()->MaxWriteAttempts) {
-            CA_LOG_E("ShardId=" << shardId
-                    << " for table '" << Settings.GetTable().GetPath()
-                    << "': retry limit exceeded."
-                    << " Sink=" << this->SelfId() << ".");
-            RuntimeError(
-                TStringBuilder()
-                    << "ShardId=" << shardId
-                    << " for table '" << Settings.GetTable().GetPath()
-                    << "': retry limit exceeded.",
-                NYql::NDqProto::StatusIds::UNAVAILABLE);
-            return;
-        }
-
-        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(
-            NKikimrDataEvents::TEvWrite::MODE_IMMEDIATE);
-        
-        if (ImmediateTx && FinalTx && Finished && metadata->IsFinal) {
-            // Last immediate write (only for datashard)
-            if (LocksInfo[shardId].GetLock()) {
-                // multi immediate evwrite
-                auto* locks = evWrite->Record.MutableLocks();
-                locks->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
-                locks->AddSendingShards(shardId);
-                locks->AddReceivingShards(shardId);
-                *locks->AddLocks() = *LocksInfo.at(shardId).GetLock();
-            }
-        } else if (!InconsistentTx) {
-            evWrite->SetLockId(Settings.GetLockTxId(), Settings.GetLockNodeId());
-        }
-
-        const auto serializationResult = ShardedWriteController->SerializeMessageToPayload(shardId, *evWrite);
-        YQL_ENSURE(serializationResult.TotalDataSize > 0);
-
-        for (size_t payloadIndex : serializationResult.PayloadIndexes) {
-            evWrite->AddOperation(
-                GetOperation(Settings.GetType()),
-                {
-                    Settings.GetTable().GetOwnerId(),
-                    Settings.GetTable().GetTableId(),
-                    Settings.GetTable().GetVersion(),
-                },
-                ShardedWriteController->GetWriteColumnIds(),
-                payloadIndex,
-                ShardedWriteController->GetDataFormat());
-        }
-
-        CA_LOG_D("Send EvWrite to ShardID=" << shardId << ", TxId=" << std::get<ui64>(TxId)
-            << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
-            << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
-            << ", Operations=" << metadata->OperationsCount << ", IsFinal=" << metadata->IsFinal
-            << ", Attempts=" << metadata->SendAttempts);
-        Send(
-            PipeCacheId,
-            new TEvPipeCache::TEvForward(evWrite.release(), shardId, true),
-            0,
-            metadata->Cookie);
-
-        ShardedWriteController->OnMessageSent(shardId, metadata->Cookie);
-
-        if (InconsistentTx) {
-            TlsActivationContext->Schedule(
-                CalculateNextAttemptDelay(metadata->SendAttempts),
-                new IEventHandle(
-                    SelfId(),
-                    SelfId(),
-                    new TEvPrivate::TEvShardRequestTimeout(shardId),
-                    0,
-                    metadata->Cookie));
-        }
-    }
-
-    void RetryShard(const ui64 shardId, const std::optional<ui64> ifCookieEqual) {
-        const auto metadata = ShardedWriteController->GetMessageMetadata(shardId);
-        if (!metadata || (ifCookieEqual && metadata->Cookie != ifCookieEqual)) {
-            CA_LOG_D("Retry failed: not found ShardID=" << shardId << " with Cookie=" << ifCookieEqual.value_or(0));
-            return;
-        }
-
-        CA_LOG_D("Retry ShardID=" << shardId << " with Cookie=" << ifCookieEqual.value_or(0));
-        SendDataToShard(shardId);
-    }
-
-    void ResetShardRetries(const ui64 shardId, const ui64 cookie) {
-        ShardedWriteController->ResetRetries(shardId, cookie);
-    }
-
-    void Handle(TEvPrivate::TEvShardRequestTimeout::TPtr& ev) {
-        CA_LOG_W("Timeout shardID=" << ev->Get()->ShardId);
-        YQL_ENSURE(InconsistentTx);
-        RetryShard(ev->Get()->ShardId, ev->Cookie);
-    }
-
-    void Handle(TEvPipeCache::TEvDeliveryProblem::TPtr& ev) {
-        CA_LOG_W("TEvDeliveryProblem was received from tablet: " << ev->Get()->TabletId);
-        if (InconsistentTx) {
-            RetryShard(ev->Get()->TabletId, std::nullopt);
-        } else {
-            RuntimeError(
-                TStringBuilder() << "Error while delivering message to tablet " << ev->Get()->TabletId,
-                NYql::NDqProto::StatusIds::UNAVAILABLE);
         }
     }
 
@@ -769,58 +852,33 @@ private:
     }
 
     void PassAway() override {
+        WriteTableActor->Terminate();
         Send(PipeCacheId, new TEvPipeCache::TEvUnlink(0));
+        // TODO: passaway table actors
         TActorBootstrapped<TKqpDirectWriteActor>::PassAway();
-    }
-
-    void Prepare() {
-        YQL_ENSURE(SchemeEntry);
-        ResolveAttempts = 0;
-
-        if (!ShardedWriteController) {
-            TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
-            columnsMetadata.reserve(Settings.GetColumns().size());
-            for (const auto & column : Settings.GetColumns()) {
-                columnsMetadata.push_back(column);
-            }
-
-            try {
-                ShardedWriteController = CreateShardedWriteController(
-                    TShardedWriteControllerSettings {
-                        .MemoryLimitTotal = kInFlightMemoryLimitPerActor,
-                        .MemoryLimitPerMessage = kMemoryLimitPerMessage,
-                        .MaxBatchesPerMessage = (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable
-                            ? 1
-                            : kMaxBatchesPerMessage),
-                    },
-                    std::move(columnsMetadata),
-                    TypeEnv,
-                    Alloc);
-            } catch (...) {
-                RuntimeError(
-                    CurrentExceptionMessage(),
-                    NYql::NDqProto::StatusIds::INTERNAL_ERROR);
-            }
-        }
-
-        try {
-            if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
-                ShardedWriteController->OnPartitioningChanged(*SchemeEntry);
-            } else {
-                ShardedWriteController->OnPartitioningChanged(*SchemeEntry, std::move(*SchemeRequest));
-            }
-            ResumeExecution();
-        } catch (...) {
-            RuntimeError(
-                CurrentExceptionMessage(),
-                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
-        }
-        ProcessBatches();
     }
 
     void ResumeExecution() {
         CA_LOG_D("Resuming execution.");
         Callbacks->ResumeExecution();
+    }
+
+    void OnMemoryUpdated() override {
+    }
+
+    i64 GetTotalFreeSpace() override {
+        return MemoryLimit;
+    }
+
+    void OnFinished() override {
+    }
+
+    void OnMessageAcknowledged(ui64 dataSize) override {
+        Y_UNUSED(dataSize);
+    }
+
+    void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) override {
+        RuntimeError(message, statusCode, subIssues);
     }
 
     NActors::TActorId PipeCacheId = NKikimr::MakePipePerNodeCacheID(false);
@@ -834,22 +892,16 @@ private:
     const NMiniKQL::TTypeEnvironment& TypeEnv;
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
-    const NYql::NDq::TTxId TxId;
+    const ui64 TxId;
+    const ui64 TaskId;
     const TTableId TableId;
-    const bool FinalTx;
-    const bool ImmediateTx;
-    const bool InconsistentTx;
+    //const bool InconsistentTx;
+    TKqpTableWriteActor* WriteTableActor = nullptr;
+    TActorId WriteTableActorId;
 
-    std::optional<NSchemeCache::TSchemeCacheNavigate::TEntry> SchemeEntry;
-    std::optional<NSchemeCache::TSchemeCacheRequest::TEntry> SchemeRequest;
-    ui64 ResolveAttempts = 0;
-
-    THashMap<ui64, TLockInfo> LocksInfo;
     bool Finished = false;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
-
-    IShardedWriteControllerPtr ShardedWriteController = nullptr;
 };
 
 void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<TKqpCounters> counters) {
