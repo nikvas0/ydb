@@ -98,11 +98,7 @@ namespace NKikimr {
 namespace NKqp {
 
 struct IKqpTableWriterCallbacks {
-    virtual void OnMemoryUpdated() = 0;
-
-    virtual i64 GetTotalFreeSpace() = 0;
-
-    virtual void OnFinished() = 0;
+    virtual void OnPrepared() = 0;
 
     virtual void OnMessageAcknowledged(ui64 dataSize) = 0;
 
@@ -181,25 +177,35 @@ public:
 
     //size_t GetShardsCount() const {
 
-    void AddData(NMiniKQL::TUnboxedValueBatch&& data, bool finished) {
+    void Write(NMiniKQL::TUnboxedValueBatch&& data) {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
-        YQL_ENSURE(!Finished);
-        Finished = finished;
+        YQL_ENSURE(!Closed);
 
         YQL_ENSURE(ShardedWriteController);
         try {
             ShardedWriteController->AddData(std::move(data));
-            if (Finished) {
-                ShardedWriteController->Close();
-            }
         } catch (...) {
             RuntimeError(
                 CurrentExceptionMessage(),
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
+    }
 
-        Callbacks->OnMemoryUpdated();
-        ProcessBatches();
+    void Close() {
+        YQL_ENSURE(!Closed);
+        Closed = true;
+        YQL_ENSURE(ShardedWriteController);
+        try {
+            ShardedWriteController->Close();
+        } catch (...) {
+            RuntimeError(
+                CurrentExceptionMessage(),
+                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
+    }
+
+    bool IsFinished() const {
+        return Closed && ShardedWriteController->IsFinished();
     }
 
     STFUNC(StateFunc) {
@@ -474,39 +480,18 @@ public:
             << ", Cookie=" << ev->Cookie
             << ", LocksCount=" << ev->Get()->Record.GetTxLocks().size());
 
-        OnMessageAcknowledged(ev->Get()->Record.GetOrigin(), ev->Cookie);
-
         for (const auto& lock : ev->Get()->Record.GetTxLocks()) {
             LocksInfo[ev->Get()->Record.GetOrigin()].AddAndCheckLock(lock);
         }
 
-        ProcessBatches();
-    }
-
-    void OnMessageAcknowledged(ui64 shardId, ui64 cookie) {
-        const auto removedDataSize = ShardedWriteController->OnMessageAcknowledged(shardId, cookie);
+        const auto removedDataSize = ShardedWriteController->OnMessageAcknowledged(
+            ev->Get()->Record.GetOrigin(), ev->Cookie);
         if (removedDataSize) {
-            //EgressStats.Bytes += *removedDataSize;
-            //EgressStats.Chunks++;
-            //EgressStats.Splits++;
-            //EgressStats.Resume();
             Callbacks->OnMessageAcknowledged(*removedDataSize);
         }
-        Callbacks->OnMemoryUpdated();
     }
 
-    void ProcessBatches() {
-        if (/*!ImmediateTx ||*/ Finished || Callbacks->GetTotalFreeSpace() <= 0) {
-            SendBatchesToShards();
-        }
-
-        if (Finished && ShardedWriteController->IsFinished()) {
-            CA_LOG_D("Write actor finished");
-            Callbacks->OnFinished();
-        }
-    }
-
-    void SendBatchesToShards() {
+    void Flush() {
         for (const size_t shardId : ShardedWriteController->GetPendingShards()) {
             SendDataToShard(shardId);
         }
@@ -532,7 +517,7 @@ public:
         auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(
             NKikimrDataEvents::TEvWrite::MODE_IMMEDIATE);
         
-        if (/*ImmediateTx && FinalTx &&*/ false && Finished && metadata->IsFinal) {
+        if (false && Closed && metadata->IsFinal) {
             // Last immediate write (only for datashard)
             if (LocksInfo[shardId].GetLock()) {
                 // multi immediate evwrite
@@ -656,8 +641,7 @@ public:
                 CurrentExceptionMessage(),
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
-        Callbacks->OnMemoryUpdated();
-        ProcessBatches();
+        Callbacks->OnPrepared();
     }
 
     void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {}) {
@@ -695,7 +679,7 @@ public:
     ui64 ResolveAttempts = 0;
 
     THashMap<ui64, TLockInfo> LocksInfo;
-    bool Finished = false;
+    bool Closed = false;
 
     IShardedWriteControllerPtr ShardedWriteController = nullptr;
 };
@@ -806,11 +790,10 @@ private:
     }
 
     i64 GetFreeSpace() const final {
-        //const i64 result = (ShardedWriteController && !IsResolving())
-        //    ? MemoryLimit - ShardedWriteController->GetMemory()
-        //    : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
-        //return result;
-        return (WriteTableActor && WriteTableActor->IsReady()) ? MemoryLimit : std::numeric_limits<i64>::min();
+        const i64 result = (WriteTableActor && WriteTableActor->IsReady())
+            ? MemoryLimit - WriteTableActor->GetMemory()
+            : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
+        return result;
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
@@ -827,11 +810,26 @@ private:
 
     void SendData(NMiniKQL::TUnboxedValueBatch&& data, i64 size, const TMaybe<NYql::NDqProto::TCheckpoint>&, bool finished) final {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
-        YQL_ENSURE(!Finished);
-        Finished = finished;
+        YQL_ENSURE(!Closed);
+        Closed = finished;
         EgressStats.Resume();
         Y_UNUSED(size);
-        WriteTableActor->AddData(std::move(data), finished);
+        WriteTableActor->Write(std::move(data));
+        if (Closed) {
+            WriteTableActor->Close();
+        }
+        Process();
+    }
+
+    void Process() {
+        if (Closed || GetFreeSpace() <= 0) {
+            WriteTableActor->Flush();
+        }
+
+        if (Closed && WriteTableActor->IsFinished()) {
+            CA_LOG_D("Write actor finished");
+            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
+        }
     }
 
     void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {}) {
@@ -857,19 +855,16 @@ private:
         Callbacks->ResumeExecution();
     }
 
-    void OnMemoryUpdated() override {
-    }
-
-    i64 GetTotalFreeSpace() override {
-        return MemoryLimit;
-    }
-
-    void OnFinished() override {
-        Callbacks->OnAsyncOutputFinished(GetOutputIndex());
+    void OnPrepared() override {
+        Process();
     }
 
     void OnMessageAcknowledged(ui64 dataSize) override {
-        Y_UNUSED(dataSize);
+        EgressStats.Bytes += dataSize;
+        EgressStats.Chunks++;
+        EgressStats.Splits++;
+        EgressStats.Resume();
+        Process();
     }
 
     void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) override {
@@ -893,7 +888,7 @@ private:
     TKqpTableWriteActor* WriteTableActor = nullptr;
     TActorId WriteTableActorId;
 
-    bool Finished = false;
+    bool Closed = false;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
