@@ -1245,12 +1245,12 @@ public:
         return (WriteInfos.contains(1) ? WriteInfos.at(1).Serializer->GetMemory() : 0) + ShardsInfo.GetMemory();
     }
 
-    bool IsClosed() const override {
+    bool IsAllWritesClosed() const override {
         return WriteInfos.at(1).Closed;
     }
 
-    bool IsFinished() const override {
-        return IsClosed() && WriteInfos.at(1).Serializer->IsFinished() && ShardsInfo.IsFinished();
+    bool IsAllWritesFinished() const override {
+        return IsAllWritesClosed() && WriteInfos.at(1).Serializer->IsFinished() && ShardsInfo.IsFinished();
     }
 
     bool IsReady() const override {

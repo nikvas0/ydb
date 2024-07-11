@@ -60,8 +60,8 @@ public:
 
     virtual i64 GetMemory() const = 0;
 
-    virtual bool IsClosed() const = 0;
-    virtual bool IsFinished() const = 0;
+    virtual bool IsAllWritesClosed() const = 0;
+    virtual bool IsAllWritesFinished() const = 0;
 
     virtual bool IsReady() const = 0;
 };

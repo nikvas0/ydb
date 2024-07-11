@@ -177,11 +177,14 @@ public:
 
     //size_t GetShardsCount() const {
 
+    // void Commit(bool immediate) {}
+
     using TWriteToken = IShardedWriteController::TWriteToken;
 
     TWriteToken Open(
         NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& columnsMetadata) {
+        YQL_ENSURE(!Closed);
         auto token = ShardedWriteController->Open(
             TableId,
             operationType,
@@ -192,7 +195,6 @@ public:
     void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
         YQL_ENSURE(!Closed);
-
         YQL_ENSURE(ShardedWriteController);
         try {
             ShardedWriteController->Write(token, std::move(data));
@@ -205,7 +207,6 @@ public:
 
     void Close(TWriteToken token) {
         YQL_ENSURE(!Closed);
-        Closed = true;
         YQL_ENSURE(ShardedWriteController);
         try {
             ShardedWriteController->Close(token);
@@ -216,8 +217,15 @@ public:
         }
     }
 
+    void Close() {
+        YQL_ENSURE(!Closed);
+        YQL_ENSURE(ShardedWriteController);
+        YQL_ENSURE(ShardedWriteController->IsAllWritesClosed());
+        Closed = true;
+    }
+
     bool IsFinished() const {
-        return Closed && ShardedWriteController->IsFinished();
+        return Closed && ShardedWriteController->IsAllWritesFinished();
     }
 
     STFUNC(StateFunc) {
@@ -822,6 +830,7 @@ private:
         WriteTableActor->Write(*WriteToken, std::move(data));
         if (Closed) {
             WriteTableActor->Close(*WriteToken);
+            WriteTableActor->Close();
         }
         Process();
     }
