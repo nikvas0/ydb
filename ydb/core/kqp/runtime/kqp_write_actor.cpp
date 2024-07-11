@@ -177,13 +177,25 @@ public:
 
     //size_t GetShardsCount() const {
 
-    void Write(NMiniKQL::TUnboxedValueBatch&& data) {
+    using TWriteToken = IShardedWriteController::TWriteToken;
+
+    TWriteToken Open(
+        NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
+        TVector<NKikimrKqp::TKqpColumnMetadataProto>&& columnsMetadata) {
+        auto token = ShardedWriteController->Open(
+            TableId,
+            operationType,
+            std::move(columnsMetadata));
+        return token;
+    }
+
+    void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
         YQL_ENSURE(!Closed);
 
         YQL_ENSURE(ShardedWriteController);
         try {
-            ShardedWriteController->Write(1, std::move(data));
+            ShardedWriteController->Write(token, std::move(data));
         } catch (...) {
             RuntimeError(
                 CurrentExceptionMessage(),
@@ -191,12 +203,12 @@ public:
         }
     }
 
-    void Close() {
+    void Close(TWriteToken token) {
         YQL_ENSURE(!Closed);
         Closed = true;
         YQL_ENSURE(ShardedWriteController);
         try {
-            ShardedWriteController->Close(1);
+            ShardedWriteController->Close(token);
         } catch (...) {
             RuntimeError(
                 CurrentExceptionMessage(),
@@ -625,17 +637,6 @@ public:
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
 
-        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
-        columnsMetadata.reserve(Settings.GetColumns().size());
-        for (const auto & column : Settings.GetColumns()) {
-            columnsMetadata.push_back(column);
-        }
-        auto token = ShardedWriteController->Open(
-            TableId,
-            GetOperation(Settings.GetType()),
-            std::move(columnsMetadata));
-        YQL_ENSURE(token == 1);
-
         Callbacks->OnPrepared();
     }
 
@@ -809,9 +810,18 @@ private:
         Closed = finished;
         EgressStats.Resume();
         Y_UNUSED(size);
-        WriteTableActor->Write(std::move(data));
+        if (!WriteToken) {
+            TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+            columnsMetadata.reserve(Settings.GetColumns().size());
+            for (const auto & column : Settings.GetColumns()) {
+                columnsMetadata.push_back(column);
+            }
+            WriteToken = WriteTableActor->Open(GetOperation(Settings.GetType()), std::move(columnsMetadata));
+        }
+
+        WriteTableActor->Write(*WriteToken, std::move(data));
         if (Closed) {
-            WriteTableActor->Close();
+            WriteTableActor->Close(*WriteToken);
         }
         Process();
     }
@@ -882,6 +892,8 @@ private:
     const TTableId TableId;
     TKqpTableWriteActor* WriteTableActor = nullptr;
     TActorId WriteTableActorId;
+
+    std::optional<TKqpTableWriteActor::TWriteToken> WriteToken;
 
     bool Closed = false;
 

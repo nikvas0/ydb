@@ -1241,8 +1241,8 @@ public:
     }
 
     i64 GetMemory() const override {
-        YQL_ENSURE(WriteInfos.at(1).Serializer);
-        return WriteInfos.at(1).Serializer->GetMemory() + ShardsInfo.GetMemory();
+        //YQL_ENSURE(WriteInfos.at(1).Serializer);
+        return (WriteInfos.contains(1) ? WriteInfos.at(1).Serializer->GetMemory() : 0) + ShardsInfo.GetMemory();
     }
 
     bool IsClosed() const override {
