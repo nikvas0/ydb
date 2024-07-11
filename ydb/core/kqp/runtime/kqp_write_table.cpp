@@ -437,14 +437,13 @@ public:
             const i64 shardBatchMemory = NArrow::GetBatchDataSize(shardBatch);
             YQL_ENSURE(shardBatchMemory != 0);
 
+            ShardIds.insert(shardId);
             auto& unpreparedBatch = UnpreparedBatches[shardId];
             unpreparedBatch.TotalDataSize += shardBatchMemory;
             unpreparedBatch.Batches.emplace_back(shardBatch);
             Memory += shardBatchMemory;
 
             FlushUnpreparedBatch(shardId, unpreparedBatch, force);
-
-            ShardIds.insert(shardId);
         }
     }
 
@@ -840,8 +839,6 @@ private:
     bool Closed = false;
 };
 
-}
-
 bool IPayloadSerializer::IBatch::IsEmpty() const {
     return GetMemory() == 0;
 }
@@ -859,6 +856,8 @@ IPayloadSerializerPtr CreateDataShardPayloadSerializer(
         const TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> inputColumns) {
     return MakeIntrusive<TDataShardPayloadSerializer>(
         schemeEntry, std::move(partitionsEntry), inputColumns);
+}
+
 }
 
 namespace {
@@ -1127,7 +1126,12 @@ public:
             result.TotalDataSize += inFlightBatch->GetMemory();
             const ui64 payloadIndex = NKikimr::NEvWrite::TPayloadWriter<NKikimr::NEvents::TDataEvents::TEvWrite>(evWrite)
                     .AddDataToPayload(inFlightBatch->SerializeToString());
-            result.PayloadIndexes.push_back(payloadIndex);
+            evWrite.AddOperation(
+                OperationType,
+                TableId,
+                GetWriteColumnIds(),
+                payloadIndex,
+                GetDataFormat());
         }
 
         return result;
@@ -1183,10 +1187,14 @@ public:
 
     TShardedWriteController(
         const TShardedWriteControllerSettings settings,
+        const TTableId tableId,
+        const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumnsMetadata,
         const NMiniKQL::TTypeEnvironment& typeEnv,
         std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc)
         : Settings(settings)
+        , TableId(tableId)
+        , OperationType(operationType)
         , InputColumnsMetadata(std::move(inputColumnsMetadata))
         , TypeEnv(typeEnv)
         , Alloc(alloc) {
@@ -1238,7 +1246,9 @@ private:
     }
 
     TShardedWriteControllerSettings Settings;
-    TVector<NKikimrKqp::TKqpColumnMetadataProto> InputColumnsMetadata;
+    const TTableId TableId;
+    const NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
+    const TVector<NKikimrKqp::TKqpColumnMetadataProto> InputColumnsMetadata;
     const NMiniKQL::TTypeEnvironment& TypeEnv;
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
@@ -1253,11 +1263,13 @@ private:
 
 IShardedWriteControllerPtr CreateShardedWriteController(
         const TShardedWriteControllerSettings& settings,
+        const TTableId tableId,
+        const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns,
         const NMiniKQL::TTypeEnvironment& typeEnv,
         std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc) {
     return MakeIntrusive<TShardedWriteController>(
-        settings, std::move(inputColumns), typeEnv, alloc);
+        settings, tableId, operationType,std::move(inputColumns), typeEnv, alloc);
 }
 
 }

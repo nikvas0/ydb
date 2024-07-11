@@ -288,7 +288,6 @@ public:
         }
 
         if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
-            //YQL_ENSURE(!ImmediateTx);
             Prepare();
         } else {
             ResolveShards();
@@ -492,6 +491,7 @@ public:
     }
 
     void Flush() {
+        // Flush can send data only partially.
         for (const size_t shardId : ShardedWriteController->GetPendingShards()) {
             SendDataToShard(shardId);
         }
@@ -533,15 +533,6 @@ public:
 
         const auto serializationResult = ShardedWriteController->SerializeMessageToPayload(shardId, *evWrite);
         YQL_ENSURE(serializationResult.TotalDataSize > 0);
-
-        for (size_t payloadIndex : serializationResult.PayloadIndexes) {
-            evWrite->AddOperation(
-                GetOperation(Settings.GetType()),
-                TableId,
-                ShardedWriteController->GetWriteColumnIds(),
-                payloadIndex,
-                ShardedWriteController->GetDataFormat());
-        }
 
         CA_LOG_D("Send EvWrite to ShardID=" << shardId << ", TxId=" << TxId
             << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
@@ -620,6 +611,8 @@ public:
                             ? 1
                             : kMaxBatchesPerMessage),
                     },
+                    TableId,
+                    GetOperation(Settings.GetType()),
                     std::move(columnsMetadata),
                     TypeEnv,
                     Alloc);

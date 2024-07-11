@@ -63,6 +63,8 @@ struct TShardedWriteControllerSettings {
 
 IShardedWriteControllerPtr CreateShardedWriteController(
     const TShardedWriteControllerSettings& settings,
+    const TTableId TableId,
+    const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
     TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns,
     const NMiniKQL::TTypeEnvironment& typeEnv,
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc);
