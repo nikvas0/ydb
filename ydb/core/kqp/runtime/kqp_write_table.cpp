@@ -1118,7 +1118,7 @@ public:
         const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns) override {
         ++CurrentWriteToken;
-        WriteInfos.emplace(
+        auto iter = WriteInfos.emplace(
             CurrentWriteToken,
             TWriteInfo {
                 .Metadata = TMetadata {
@@ -1128,7 +1128,17 @@ public:
                 },
                 .Serializer = nullptr,
                 .Closed = false,
-            });
+            }).first;
+        if (PartitionsEntry) {
+            iter->second.Serializer = CreateDataShardPayloadSerializer(
+                *SchemeEntry,
+                *PartitionsEntry,
+                iter->second.Metadata.InputColumnsMetadata);
+        } else if (SchemeEntry) {
+            iter->second.Serializer = CreateColumnShardPayloadSerializer(
+                *SchemeEntry,
+                iter->second.Metadata.InputColumnsMetadata);
+        }
         return CurrentWriteToken;
     }
 

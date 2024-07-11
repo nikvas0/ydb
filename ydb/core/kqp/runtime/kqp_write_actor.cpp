@@ -611,17 +611,6 @@ public:
             }
         }
 
-        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
-        columnsMetadata.reserve(Settings.GetColumns().size());
-        for (const auto & column : Settings.GetColumns()) {
-            columnsMetadata.push_back(column);
-        }
-        auto token = ShardedWriteController->Open(
-            TableId,
-            GetOperation(Settings.GetType()),
-            std::move(columnsMetadata));
-        YQL_ENSURE(token == 1);
-
         try {
             if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
                 ShardedWriteController->OnPartitioningChanged(std::move(*SchemeEntry));
@@ -635,6 +624,17 @@ public:
                 CurrentExceptionMessage(),
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
+
+        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+        columnsMetadata.reserve(Settings.GetColumns().size());
+        for (const auto & column : Settings.GetColumns()) {
+            columnsMetadata.push_back(column);
+        }
+        auto token = ShardedWriteController->Open(
+            TableId,
+            GetOperation(Settings.GetType()),
+            std::move(columnsMetadata));
+        YQL_ENSURE(token == 1);
 
         Callbacks->OnPrepared();
     }
