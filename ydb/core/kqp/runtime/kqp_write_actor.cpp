@@ -183,7 +183,7 @@ public:
 
         YQL_ENSURE(ShardedWriteController);
         try {
-            ShardedWriteController->AddData(std::move(data));
+            ShardedWriteController->Write(1, std::move(data));
         } catch (...) {
             RuntimeError(
                 CurrentExceptionMessage(),
@@ -196,7 +196,7 @@ public:
         Closed = true;
         YQL_ENSURE(ShardedWriteController);
         try {
-            ShardedWriteController->Close();
+            ShardedWriteController->Close(1);
         } catch (...) {
             RuntimeError(
                 CurrentExceptionMessage(),
@@ -241,9 +241,6 @@ public:
     }
 
     void ResolveTable() {
-        SchemeEntry.reset();
-        SchemeRequest.reset();
-
         if (ResolveAttempts++ >= BackoffSettings()->MaxResolveAttempts) {
             const auto error = TStringBuilder()
                 << "Too many table resolve attempts for Sink=" << this->SelfId() << ".";
@@ -596,12 +593,6 @@ public:
         ResolveAttempts = 0;
 
         if (!ShardedWriteController) {
-            TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
-            columnsMetadata.reserve(Settings.GetColumns().size());
-            for (const auto & column : Settings.GetColumns()) {
-                columnsMetadata.push_back(column);
-            }
-
             try {
                 ShardedWriteController = CreateShardedWriteController(
                     TShardedWriteControllerSettings {
@@ -611,9 +602,6 @@ public:
                             ? 1
                             : kMaxBatchesPerMessage),
                     },
-                    TableId,
-                    GetOperation(Settings.GetType()),
-                    std::move(columnsMetadata),
                     TypeEnv,
                     Alloc);
             } catch (...) {
@@ -623,17 +611,31 @@ public:
             }
         }
 
+        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+        columnsMetadata.reserve(Settings.GetColumns().size());
+        for (const auto & column : Settings.GetColumns()) {
+            columnsMetadata.push_back(column);
+        }
+        auto token = ShardedWriteController->Open(
+            TableId,
+            GetOperation(Settings.GetType()),
+            std::move(columnsMetadata));
+        YQL_ENSURE(token == 1);
+
         try {
             if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
-                ShardedWriteController->OnPartitioningChanged(*SchemeEntry);
+                ShardedWriteController->OnPartitioningChanged(std::move(*SchemeEntry));
             } else {
-                ShardedWriteController->OnPartitioningChanged(*SchemeEntry, std::move(*SchemeRequest));
+                ShardedWriteController->OnPartitioningChanged(std::move(*SchemeEntry), std::move(*SchemeRequest));
             }
+            SchemeEntry.reset();
+            SchemeRequest.reset();
         } catch (...) {
             RuntimeError(
                 CurrentExceptionMessage(),
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
+
         Callbacks->OnPrepared();
     }
 

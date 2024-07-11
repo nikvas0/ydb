@@ -12,13 +12,27 @@ namespace NKqp {
 
 class IShardedWriteController : public TThrRefBase {
 public:
-    virtual void OnPartitioningChanged(const NSchemeCache::TSchemeCacheNavigate::TEntry& schemeEntry) = 0;
     virtual void OnPartitioningChanged(
-        const NSchemeCache::TSchemeCacheNavigate::TEntry& schemeEntry,
+        NSchemeCache::TSchemeCacheNavigate::TEntry&& schemeEntry) = 0;
+    virtual void OnPartitioningChanged(
+        NSchemeCache::TSchemeCacheNavigate::TEntry&& schemeEntry,
         NSchemeCache::TSchemeCacheRequest::TEntry&& partitionsEntry) = 0;
 
-    virtual void AddData(NMiniKQL::TUnboxedValueBatch&& data) = 0;
-    virtual void Close() = 0;
+    using TWriteToken = ui64;
+
+    // Data ordering invariant:
+    // For two writes A and B:
+    // A happend before B <=> Close(A) happend before Open(B).
+
+    virtual TWriteToken Open(
+        const TTableId TableId,
+        const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
+        TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns) = 0;
+    virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
+    virtual void Close(TWriteToken token) = 0;
+
+    //virtual void AddData(NMiniKQL::TUnboxedValueBatch&& data) = 0;
+    //virtual void Close() = 0;
 
     virtual TVector<ui64> GetPendingShards() const = 0;
 
@@ -63,9 +77,6 @@ struct TShardedWriteControllerSettings {
 
 IShardedWriteControllerPtr CreateShardedWriteController(
     const TShardedWriteControllerSettings& settings,
-    const TTableId TableId,
-    const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
-    TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns,
     const NMiniKQL::TTypeEnvironment& typeEnv,
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc);
 
