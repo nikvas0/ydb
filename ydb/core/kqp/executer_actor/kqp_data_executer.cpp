@@ -2287,9 +2287,7 @@ private:
             (datashardTxs.size() + topicTxs.size()) > 1 &&
             // We cannot use volatile transactions with persistent channels
             // Note: currently persistent channels are never used
-            !HasPersistentChannels &&
-            // Can't use volatile transactions for EvWrite at current time
-            !UseEvWrite);
+            !HasPersistentChannels);
 
         const bool useGenericReadSets = (
             // Use generic readsets when feature is explicitly enabled

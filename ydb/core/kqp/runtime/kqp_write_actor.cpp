@@ -98,6 +98,8 @@ namespace NKikimr {
 namespace NKqp {
 
 struct IKqpTableWriterCallbacks {
+    virtual ~IKqpTableWriterCallbacks() = default;
+
     virtual void OnPrepared() = 0;
 
     virtual void OnMessageAcknowledged(ui64 dataSize) = 0;
@@ -128,19 +130,16 @@ class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
 
 public:
     TKqpTableWriteActor(
-        const NKikimrKqp::TKqpTableSinkSettings& settings, // TODO: delete it
         IKqpTableWriterCallbacks* callbacks,
         const TTableId tableId,
         const TStringBuf tablePath,
         const ui64 txId,
-        const ui64 taskId,
         const ui64 lockTxId,
         const ui64 lockNodeId,
         const bool inconsistentTx,
         const NMiniKQL::TTypeEnvironment& typeEnv,
         std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc)
-        : LogPrefix(TStringBuilder() << "TxId: " << txId << ", task: " << taskId << ". ")
-        , Settings(settings)
+        : LogPrefix(TStringBuilder() << "TxId: " << txId << ". ")
         , TypeEnv(typeEnv)
         , Alloc(alloc)
         , TxId(txId)
@@ -665,7 +664,6 @@ public:
     NActors::TActorId PipeCacheId = NKikimr::MakePipePerNodeCacheID(false);
 
     TString LogPrefix;
-    const NKikimrKqp::TKqpTableSinkSettings& Settings;
     const NMiniKQL::TTypeEnvironment& TypeEnv;
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
@@ -705,7 +703,6 @@ public:
         , TypeEnv(args.TypeEnv)
         , Alloc(args.Alloc)
         , TxId(std::get<ui64>(args.TxId))
-        , TaskId(args.TaskId)
         , TableId(
             Settings.GetTable().GetOwnerId(),
             Settings.GetTable().GetTableId(),
@@ -717,12 +714,10 @@ public:
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
         WriteTableActor = new TKqpTableWriteActor(
-            Settings,
             this,
             TableId,
             Settings.GetTable().GetPath(),
             TxId,
-            TaskId,
             Settings.GetLockTxId(),
             Settings.GetLockNodeId(),
             Settings.GetInconsistentTx(),
@@ -827,7 +822,6 @@ private:
 
     void PassAway() override {
         WriteTableActor->Terminate();
-        Send(PipeCacheId, new TEvPipeCache::TEvUnlink(0));
         TActorBootstrapped<TKqpDirectWriteActor>::PassAway();
     }
 
@@ -853,8 +847,6 @@ private:
         RuntimeError(message, statusCode, subIssues);
     }
 
-    NActors::TActorId PipeCacheId = NKikimr::MakePipePerNodeCacheID(false);
-
     TString LogPrefix;
     const NKikimrKqp::TKqpTableSinkSettings Settings;
     const ui64 OutputIndex;
@@ -865,7 +857,6 @@ private:
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
     const ui64 TxId;
-    const ui64 TaskId;
     const TTableId TableId;
     TKqpTableWriteActor* WriteTableActor = nullptr;
     TActorId WriteTableActorId;
@@ -878,7 +869,133 @@ private:
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
 
-//class TKqpBufferWriteActor
+/*class TKqpBufferWriteActor :public TActorBootstrapped<TKqpDirectWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
+    using TBase = TActorBootstrapped<TKqpDirectWriteActor>;
+
+public:
+    TKqpBufferWriteActor(
+        const ui64 txId,
+        IKqpBufferWriterCallbacks* callbacks)
+        : TxId(txId)
+        , Callbacks(callbacks) {
+    }
+
+    void Bootstrap() {
+        LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+    }
+
+    static constexpr char ActorName[] = "KQP_BUFFER_WRITE_ACTOR";
+
+private:
+    TWriteToken Open(TWriteSettings&& settings) override {
+        WriteTableActor = new TKqpTableWriteActor(
+            Settings,
+            this,
+            TableId,
+            Settings.GetTable().GetPath(),
+            TxId,
+            TaskId,
+            Settings.GetLockTxId(),
+            Settings.GetLockNodeId(),
+            Settings.GetInconsistentTx(),
+            TypeEnv,
+            Alloc);
+
+        WriteTableActorId = RegisterWithSameMailbox(WriteTableActor);
+
+        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+        columnsMetadata.reserve(Settings.GetColumns().size());
+        for (const auto & column : Settings.GetColumns()) {
+            columnsMetadata.push_back(column);
+        }
+        WriteToken = WriteTableActor->Open(GetOperation(Settings.GetType()), std::move(columnsMetadata));
+    }
+
+    void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
+    }
+
+    void Close(TWriteToken token) override {
+    }
+
+    void Prepare(TPrepareSettings&& prepareSettings) override {
+    }
+
+    void ImmediateCommit() override {
+    }
+
+    void Rollback() override {
+    }
+
+    i64 GetFreeSpace() const final {
+        return (WriteTableActor && WriteTableActor->IsReady())
+            ? MemoryLimit - GetMemory()
+            : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
+    }
+
+    i64 GetMemory() const {
+        return (WriteTableActor && WriteTableActor->IsReady())
+            ? WriteTableActor->GetMemory()
+            : 0;
+    }
+
+    TVector<ui64> GetShardsIds() override {
+        return {};
+    }
+
+    void PassAway() override {
+        WriteTableActor->Terminate();
+        TActorBootstrapped<TKqpDirectWriteActor>::PassAway();
+    }
+
+    void Process() {
+        if (GetFreeSpace() <= 0) {
+            OutOfMemory = true;
+        } else if (OutOfMemory && GetFreeSpace() > MemoryLimit / 2) {
+            ResumeExecution();
+        }
+
+        if (Closed || GetFreeSpace() <= 0) {
+            WriteTableActor->Flush();
+        }
+
+        if (Closed && WriteTableActor->IsFinished()) {
+            CA_LOG_D("Write actor finished");
+        }
+    }
+
+    void OnPrepared() override {
+        Process();
+    }
+
+    void OnMessageAcknowledged(ui64) override {
+        Process();
+    }
+
+    void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) override {
+        RuntimeError(message, statusCode, subIssues);
+    }
+
+private:
+    TString LogPrefix;
+
+    const ui64 TxId;
+    IKqpBufferWriterCallbacks* Callbacks = nullptr;
+
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
+    NMiniKQL::TTypeEnvironment TypeEnv;
+
+    struct TWriteInfo {
+        TKqpTableWriteActor* WriteTableActor = nullptr;
+        TActorId WriteTableActorId;
+
+        THashMap<ui64, std::function<void()>> ResumeExecutionCallbacks;
+    };
+
+    THashMap<TTableId, TWriteInfo> WriteInfos;
+    bool OutOfMemory = false;
+
+    const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
+};*/
 
 void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<TKqpCounters> counters) {
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(
