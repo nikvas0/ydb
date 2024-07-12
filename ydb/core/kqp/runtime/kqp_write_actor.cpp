@@ -191,7 +191,11 @@ public:
         return LocksInfo;
     }
 
-    //size_t GetShardsCount() const {
+    std::optional<size_t> GetShardsCount() const {
+        return (InconsistentTx || !ShardedWriteController)
+            ? std::nullopt
+            : std::optional<size_t>(ShardedWriteController->GetShardsCount());
+    }
 
     // void Commit(bool immediate) {}
 

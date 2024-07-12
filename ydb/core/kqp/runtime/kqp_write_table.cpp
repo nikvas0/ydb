@@ -1039,6 +1039,10 @@ public:
         return ShardsInfo;
     }
 
+    const THashMap<ui64, TShardInfo>& GetShards() const {
+        return ShardsInfo;
+    }
+
     i64 GetMemory() const {
         return Memory;
     }
@@ -1277,6 +1281,10 @@ public:
             }
         }
         return true;
+    }
+
+    ui64 GetShardsCount() const override {
+        return ShardsInfo.GetShards().size();
     }
 
     TShardedWriteController(

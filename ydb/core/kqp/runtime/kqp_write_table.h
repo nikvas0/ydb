@@ -32,6 +32,7 @@ public:
     virtual void Close(TWriteToken token) = 0;
 
     virtual TVector<ui64> GetPendingShards() const = 0;
+    virtual ui64 GetShardsCount() const = 0;
 
     struct TMessageMetadata {
         ui64 Cookie = 0;
