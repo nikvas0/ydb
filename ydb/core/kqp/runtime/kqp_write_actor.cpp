@@ -692,48 +692,6 @@ public:
 class TKqpDirectWriteActor : public TActorBootstrapped<TKqpDirectWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpDirectWriteActor>;
 
-    class TResumeNotificationManager {
-    public:
-        TResumeNotificationManager(TKqpDirectWriteActor& writer)
-            : Writer(writer) {
-            CheckMemory();
-        }
-
-        void CheckMemory() {
-            const auto freeSpace = Writer.GetFreeSpace();
-            const auto targetMemory = Writer.MemoryLimit / 2;
-            if (freeSpace >= targetMemory && targetMemory > LastFreeMemory) {
-                YQL_ENSURE(freeSpace > 0);
-                Writer.ResumeExecution();
-            }
-            LastFreeMemory = freeSpace;
-        }
-
-    private:
-        TKqpDirectWriteActor& Writer;
-        i64 LastFreeMemory = std::numeric_limits<i64>::max();
-    };
-
-    friend class TResumeNotificationManager;
-
-    struct TEvPrivate {
-        enum EEv {
-            EvShardRequestTimeout = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
-            EvResolveRequestPlanned,
-        };
-
-        struct TEvShardRequestTimeout : public TEventLocal<TEvShardRequestTimeout, EvShardRequestTimeout> {
-            ui64 ShardId;
-
-            TEvShardRequestTimeout(ui64 shardId)
-                : ShardId(shardId) {
-            }
-        };
-
-        struct TEvResolveRequestPlanned : public TEventLocal<TEvResolveRequestPlanned, EvResolveRequestPlanned> {
-        };
-    };
-
 public:
     TKqpDirectWriteActor(
         NKikimrKqp::TKqpTableSinkSettings&& settings,
@@ -779,8 +737,7 @@ public:
             columnsMetadata.push_back(column);
         }
         WriteToken = WriteTableActor->Open(GetOperation(Settings.GetType()), std::move(columnsMetadata));
-
-        ResumeExecution();
+        OutOfMemory = true;
     }
 
     static constexpr char ActorName[] = "KQP_DIRECT_WRITE_ACTOR";
@@ -801,10 +758,15 @@ private:
     }
 
     i64 GetFreeSpace() const final {
-        const i64 result = (WriteTableActor && WriteTableActor->IsReady())
-            ? MemoryLimit - WriteTableActor->GetMemory()
+        return (WriteTableActor && WriteTableActor->IsReady())
+            ? MemoryLimit - GetMemory()
             : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
-        return result;
+    }
+
+    i64 GetMemory() const {
+        return (WriteTableActor && WriteTableActor->IsReady())
+            ? WriteTableActor->GetMemory()
+            : 0;
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
@@ -835,6 +797,12 @@ private:
     }
 
     void Process() {
+        if (GetFreeSpace() <= 0) {
+            OutOfMemory = true;
+        } else if (OutOfMemory && GetFreeSpace() > MemoryLimit / 2) {
+            ResumeExecution();
+        }
+
         if (Closed || GetFreeSpace() <= 0) {
             WriteTableActor->Flush();
         }
@@ -865,6 +833,7 @@ private:
 
     void ResumeExecution() {
         CA_LOG_D("Resuming execution.");
+        OutOfMemory = false;
         Callbacks->ResumeExecution();
     }
 
@@ -905,8 +874,11 @@ private:
 
     bool Closed = false;
 
+    bool OutOfMemory = false;
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
+
+//class TKqpBufferWriteActor
 
 void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<TKqpCounters> counters) {
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(
