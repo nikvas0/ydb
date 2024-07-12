@@ -31,9 +31,6 @@ public:
     virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
     virtual void Close(TWriteToken token) = 0;
 
-    //virtual void AddData(NMiniKQL::TUnboxedValueBatch&& data) = 0;
-    //virtual void Close() = 0;
-
     virtual TVector<ui64> GetPendingShards() const = 0;
 
     struct TMessageMetadata {
@@ -50,8 +47,6 @@ public:
     };
 
     virtual TSerializationResult SerializeMessageToPayload(ui64 shardId, NKikimr::NEvents::TDataEvents::TEvWrite& evWrite) = 0;
-    virtual NKikimrDataEvents::EDataFormat GetDataFormat() = 0;
-    virtual std::vector<ui32> GetWriteColumnIds() = 0;
 
     virtual std::optional<i64> OnMessageAcknowledged(ui64 shardId, ui64 cookie) = 0;
     virtual void OnMessageSent(ui64 shardId, ui64 cookie) = 0;

@@ -24,7 +24,7 @@
 namespace {
     constexpr i64 kInFlightMemoryLimitPerActor = 64_MB;
     constexpr i64 kMemoryLimitPerMessage = 64_MB;
-    constexpr i64 kMaxBatchesPerMessage = 8;
+    constexpr i64 kMaxBatchesPerMessage = 64;
 
     struct TWriteActorBackoffSettings {
         TDuration StartRetryDelay = TDuration::MilliSeconds(250);
@@ -151,6 +151,22 @@ public:
         , InconsistentTx(inconsistentTx)
         , Callbacks(callbacks)
     {
+        try {
+            ShardedWriteController = CreateShardedWriteController(
+                TShardedWriteControllerSettings {
+                    .MemoryLimitTotal = kInFlightMemoryLimitPerActor,
+                    .MemoryLimitPerMessage = kMemoryLimitPerMessage,
+                    .MaxBatchesPerMessage = (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable
+                        ? 1
+                        : kMaxBatchesPerMessage),
+                },
+                TypeEnv,
+                Alloc);
+        } catch (...) {
+            RuntimeError(
+                CurrentExceptionMessage(),
+                NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
     }
 
     void Bootstrap() {
@@ -168,7 +184,7 @@ public:
     }
 
     bool IsReady() const {
-        return ShardedWriteController != nullptr;
+        return ShardedWriteController != nullptr && ShardedWriteController->IsReady();
     }
 
     const THashMap<ui64, TLockInfo>& GetLocks() const {
@@ -612,25 +628,6 @@ public:
         YQL_ENSURE(SchemeEntry);
         ResolveAttempts = 0;
 
-        if (!ShardedWriteController) {
-            try {
-                ShardedWriteController = CreateShardedWriteController(
-                    TShardedWriteControllerSettings {
-                        .MemoryLimitTotal = kInFlightMemoryLimitPerActor,
-                        .MemoryLimitPerMessage = kMemoryLimitPerMessage,
-                        .MaxBatchesPerMessage = (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable
-                            ? 1
-                            : kMaxBatchesPerMessage),
-                    },
-                    TypeEnv,
-                    Alloc);
-            } catch (...) {
-                RuntimeError(
-                    CurrentExceptionMessage(),
-                    NYql::NDqProto::StatusIds::INTERNAL_ERROR);
-            }
-        }
-
         try {
             if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
                 ShardedWriteController->OnPartitioningChanged(std::move(*SchemeEntry));
@@ -771,7 +768,13 @@ public:
             Alloc);
 
         WriteTableActorId = RegisterWithSameMailbox(WriteTableActor);
-        Y_UNUSED(WriteTableActorId);
+
+        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+        columnsMetadata.reserve(Settings.GetColumns().size());
+        for (const auto & column : Settings.GetColumns()) {
+            columnsMetadata.push_back(column);
+        }
+        WriteToken = WriteTableActor->Open(GetOperation(Settings.GetType()), std::move(columnsMetadata));
 
         ResumeExecution();
     }
@@ -818,14 +821,6 @@ private:
         Closed = finished;
         EgressStats.Resume();
         Y_UNUSED(size);
-        if (!WriteToken) {
-            TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
-            columnsMetadata.reserve(Settings.GetColumns().size());
-            for (const auto & column : Settings.GetColumns()) {
-                columnsMetadata.push_back(column);
-            }
-            WriteToken = WriteTableActor->Open(GetOperation(Settings.GetType()), std::move(columnsMetadata));
-        }
 
         WriteTableActor->Write(*WriteToken, std::move(data));
         if (Closed) {

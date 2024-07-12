@@ -1065,10 +1065,11 @@ public:
     void OnPartitioningChanged(NSchemeCache::TSchemeCacheNavigate::TEntry&& schemeEntry) override {
         SchemeEntry = std::move(schemeEntry);
         BeforePartitioningChanged();
-        if (!WriteInfos.empty()) {
-            WriteInfos.at(1).Serializer = CreateColumnShardPayloadSerializer(
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            auto& writeInfo = WriteInfos.at(token);
+            writeInfo.Serializer = CreateColumnShardPayloadSerializer(
                 *SchemeEntry,
-                WriteInfos.at(1).Metadata.InputColumnsMetadata);
+                writeInfo.Metadata.InputColumnsMetadata);
         }
         AfterPartitioningChanged();
     }
@@ -1079,23 +1080,25 @@ public:
         SchemeEntry = std::move(schemeEntry);
         PartitionsEntry = std::move(partitionsEntry);
         BeforePartitioningChanged();
-        if (!WriteInfos.empty()) {
-            WriteInfos.at(1).Serializer = CreateDataShardPayloadSerializer(
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            auto& writeInfo = WriteInfos.at(token);
+            writeInfo.Serializer = CreateDataShardPayloadSerializer(
                 *SchemeEntry,
                 *PartitionsEntry,
-                WriteInfos.at(1).Metadata.InputColumnsMetadata);
+                writeInfo.Metadata.InputColumnsMetadata);
         }
         AfterPartitioningChanged();
     }
 
     void BeforePartitioningChanged() {
-        if (!WriteInfos.empty()) {
-            if (WriteInfos.at(1).Serializer) {
-                if (!WriteInfos.at(1).Closed) {
-                    WriteInfos.at(1).Serializer->Close();
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            auto& writeInfo = WriteInfos.at(token);
+            if (writeInfo.Serializer) {
+                if (!writeInfo.Closed) {
+                    writeInfo.Serializer->Close();
                 }
-                FlushSerializer(true);
-                WriteInfos.at(1).Serializer = nullptr;
+                FlushSerializer(token, true);
+                writeInfo.Serializer = nullptr;
             }
         }
     }
@@ -1105,10 +1108,13 @@ public:
             ShardsInfo.Close();
             ReshardData();
             ShardsInfo.Clear();
-            if (WriteInfos.at(1).Closed) {
-                Close(1);
-            } else {
-                FlushSerializer(GetMemory() >= Settings.MemoryLimitTotal);
+            for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+                const auto& writeInfo = WriteInfos.at(token);
+                if (writeInfo.Closed) {
+                    Close(token);
+                } else {
+                    FlushSerializer(token, GetMemory() >= Settings.MemoryLimitTotal);
+                }
             }
         }
     }
@@ -1117,9 +1123,9 @@ public:
         const TTableId tableId,
         const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns) override {
-        ++CurrentWriteToken;
+        auto token = CurrentWriteToken++;
         auto iter = WriteInfos.emplace(
-            CurrentWriteToken,
+            token,
             TWriteInfo {
                 .Metadata = TMetadata {
                     .TableId = tableId,
@@ -1139,28 +1145,27 @@ public:
                 *SchemeEntry,
                 iter->second.Metadata.InputColumnsMetadata);
         }
-        return CurrentWriteToken;
+        return token;
     }
 
     void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
-        YQL_ENSURE(!WriteInfos.at(1).Closed);
+        YQL_ENSURE(!WriteInfos.at(token).Closed);
 
         auto allocGuard = TypeEnv.BindAllocator();
         YQL_ENSURE(WriteInfos.at(token).Serializer);
         WriteInfos.at(token).Serializer->AddData(std::move(data));
 
-        FlushSerializer(GetMemory() >= Settings.MemoryLimitTotal);
+        FlushSerializer(token, GetMemory() >= Settings.MemoryLimitTotal);
     }
 
     void Close(TWriteToken token) override {
-        YQL_ENSURE(token == 1);
         auto allocGuard = TypeEnv.BindAllocator();
-        YQL_ENSURE(WriteInfos.at(1).Serializer);
-        WriteInfos.at(1).Closed = true;
-        WriteInfos.at(1).Serializer->Close();
-        FlushSerializer(true);
-        YQL_ENSURE(WriteInfos.at(1).Serializer->IsFinished());
+        YQL_ENSURE(WriteInfos.at(token).Serializer);
+        WriteInfos.at(token).Closed = true;
+        WriteInfos.at(token).Serializer->Close();
+        FlushSerializer(token, true);
+        YQL_ENSURE(WriteInfos.at(token).Serializer->IsFinished());
         ShardsInfo.Close();
     }
 
@@ -1201,20 +1206,12 @@ public:
             evWrite.AddOperation(
                 WriteInfos.at(inFlightBatch.Token).Metadata.OperationType,
                 WriteInfos.at(inFlightBatch.Token).Metadata.TableId,
-                GetWriteColumnIds(),
+                WriteInfos.at(inFlightBatch.Token).Serializer->GetWriteColumnIds(),
                 payloadIndex,
-                GetDataFormat());
+                WriteInfos.at(inFlightBatch.Token).Serializer->GetDataFormat());
         }
 
         return result;
-    }
-
-    NKikimrDataEvents::EDataFormat GetDataFormat() override {
-        return WriteInfos.at(1).Serializer->GetDataFormat();
-    }
-
-    std::vector<ui32> GetWriteColumnIds() override {
-        return WriteInfos.at(1).Serializer->GetWriteColumnIds();
     }
 
     std::optional<i64> OnMessageAcknowledged(ui64 shardId, ui64 cookie) override {
@@ -1241,20 +1238,45 @@ public:
     }
 
     i64 GetMemory() const override {
-        //YQL_ENSURE(WriteInfos.at(1).Serializer);
-        return (WriteInfos.contains(1) ? WriteInfos.at(1).Serializer->GetMemory() : 0) + ShardsInfo.GetMemory();
+        i64 total = ShardsInfo.GetMemory();
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            const auto& writeInfo = WriteInfos.at(token);
+            if (writeInfo.Serializer) {
+                total += writeInfo.Serializer->GetMemory();
+            } else {
+                Y_ABORT_UNLESS(writeInfo.Closed);
+            }
+        }
+        return total;
     }
 
     bool IsAllWritesClosed() const override {
-        return WriteInfos.at(1).Closed;
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            if (!WriteInfos.at(token).Closed) {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool IsAllWritesFinished() const override {
-        return IsAllWritesClosed() && WriteInfos.at(1).Serializer->IsFinished() && ShardsInfo.IsFinished();
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            const auto& writeInfo = WriteInfos.at(token);
+            if (!writeInfo.Closed || !writeInfo.Serializer->IsFinished()) {
+                return false;
+            }
+        }
+        return ShardsInfo.IsFinished();
     }
 
     bool IsReady() const override {
-        return WriteInfos.at(1).Serializer != nullptr;
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            const auto& writeInfo = WriteInfos.at(token);
+            if (!writeInfo.Serializer && !writeInfo.Closed) {
+                return false;
+            }
+        }
+        return true;
     }
 
     TShardedWriteController(
@@ -1270,30 +1292,34 @@ public:
         Y_ABORT_UNLESS(Alloc);
         TGuard<NMiniKQL::TScopedAlloc> allocGuard(*Alloc);
         ShardsInfo.Clear();
-        WriteInfos.at(1).Serializer = nullptr;
+        for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
+            WriteInfos.at(token).Serializer = nullptr;
+        }
     }
 
 private:
-    void FlushSerializer(bool force) {
+    void FlushSerializer(TWriteToken token, bool force) {
         if (force) {
-            for (auto& [shardId, batches] : WriteInfos.at(1).Serializer->FlushBatchesForce()) {
+            const auto& writeInfo = WriteInfos.at(token);
+            for (auto& [shardId, batches] : writeInfo.Serializer->FlushBatchesForce()) {
                 for (auto& batch : batches) {
                     ShardsInfo.GetShard(shardId).PushBatch(TBatchWithMetadata{
-                        .Token = 1,
+                        .Token = token,
                         .Data = std::move(batch),
                     });
                 }
             }
         } else {
-            for (const ui64 shardId : WriteInfos.at(1).Serializer->GetShardIds()) {
+            const auto& writeInfo = WriteInfos.at(token);
+            for (const ui64 shardId : writeInfo.Serializer->GetShardIds()) {
                 auto& shard = ShardsInfo.GetShard(shardId);
                 while (true) {
-                    auto batch = WriteInfos.at(1).Serializer->FlushBatch(shardId);
+                    auto batch = writeInfo.Serializer->FlushBatch(shardId);
                     if (!batch || batch->IsEmpty()) {
                         break;
                     }
                     shard.PushBatch(TBatchWithMetadata{
-                        .Token = 1,
+                        .Token = token,
                         .Data = std::move(batch),
                     });
                 }
@@ -1312,7 +1338,9 @@ private:
     void ReshardData() {
         for (auto& [_, shardInfo] : ShardsInfo.GetShards()) {
             for (size_t index = 0; index < shardInfo.Size(); ++index) {
-                WriteInfos.at(1).Serializer->AddBatch(shardInfo.GetBatch(index).Data);
+                const auto& batch = shardInfo.GetBatch(index);
+                const auto& writeInfo = WriteInfos.at(batch.Token);
+                writeInfo.Serializer->AddBatch(batch.Data);
             }
         }
     }
