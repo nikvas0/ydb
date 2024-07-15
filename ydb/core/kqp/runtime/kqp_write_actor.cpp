@@ -869,15 +869,16 @@ private:
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
 
-/*class TKqpBufferWriteActor :public TActorBootstrapped<TKqpDirectWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
+class TKqpBufferWriteActor :public TActorBootstrapped<TKqpDirectWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpDirectWriteActor>;
 
 public:
     TKqpBufferWriteActor(
-        const ui64 txId,
-        IKqpBufferWriterCallbacks* callbacks)
-        : TxId(txId)
-        , Callbacks(callbacks) {
+        TKqpBufferWriterSettings&& settings)
+        : Settings(std::move(settings))
+        , Alloc(std::make_shared<NKikimr::NMiniKQL::TScopedAlloc>(__LOCATION__))
+        , TypeEnv(*Alloc) {
+        Alloc->Release();
     }
 
     void Bootstrap() {
@@ -888,27 +889,23 @@ public:
 
 private:
     TWriteToken Open(TWriteSettings&& settings) override {
-        WriteTableActor = new TKqpTableWriteActor(
-            Settings,
+        auto& info = WriteInfos[settings.TableId];
+
+        info.WriteTableActor = new TKqpTableWriteActor(
             this,
-            TableId,
-            Settings.GetTable().GetPath(),
-            TxId,
-            TaskId,
-            Settings.GetLockTxId(),
-            Settings.GetLockNodeId(),
-            Settings.GetInconsistentTx(),
+            settings.TableId,
+            settings.TablePath,
+            Settings.TxId,
+            Settings.LockTxId,
+            Settings.LockNodeId,
+            Settings.InconsistentTx,
             TypeEnv,
             Alloc);
 
-        WriteTableActorId = RegisterWithSameMailbox(WriteTableActor);
+        info.WriteTableActorId = RegisterWithSameMailbox(info.WriteTableActor);
 
-        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
-        columnsMetadata.reserve(Settings.GetColumns().size());
-        for (const auto & column : Settings.GetColumns()) {
-            columnsMetadata.push_back(column);
-        }
-        WriteToken = WriteTableActor->Open(GetOperation(Settings.GetType()), std::move(columnsMetadata));
+        auto writeToken = info.WriteTableActor->Open(settings.OperationType, std::move(settings.Columns));
+        return {settings.TableId, std::move(writeToken)};
     }
 
     void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
@@ -926,7 +923,7 @@ private:
     void Rollback() override {
     }
 
-    i64 GetFreeSpace() const final {
+    i64 GetFreeSpace() const override {
         return (WriteTableActor && WriteTableActor->IsReady())
             ? MemoryLimit - GetMemory()
             : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
@@ -938,7 +935,7 @@ private:
             : 0;
     }
 
-    TVector<ui64> GetShardsIds() override {
+    TVector<ui64> GetShardsIds() const override {
         return {};
     }
 
@@ -978,8 +975,8 @@ private:
 private:
     TString LogPrefix;
 
-    const ui64 TxId;
-    IKqpBufferWriterCallbacks* Callbacks = nullptr;
+    const TKqpBufferWriterSettings Settings;
+    //IKqpBufferWriterCallbacks* Callbacks = nullptr;
 
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
     NMiniKQL::TTypeEnvironment TypeEnv;
@@ -995,7 +992,7 @@ private:
     bool OutOfMemory = false;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
-};*/
+};
 
 void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<TKqpCounters> counters) {
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(

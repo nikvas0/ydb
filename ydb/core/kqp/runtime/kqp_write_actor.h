@@ -41,7 +41,7 @@ public:
     virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
     virtual void Close(TWriteToken token) = 0;
 
-    virtual i64 GetFreeSpace() = 0;
+    virtual i64 GetFreeSpace() const = 0;
 
     struct TPrepareSettings {
         // External = not EvWrite, for example, topics.
@@ -55,7 +55,7 @@ public:
     virtual void ImmediateCommit() = 0;
     virtual void Rollback() = 0;
 
-    virtual TVector<ui64> GetShardsIds() = 0;
+    virtual TVector<ui64> GetShardsIds() const = 0;
 };
 
 struct TKqpBufferWriterSettings {
