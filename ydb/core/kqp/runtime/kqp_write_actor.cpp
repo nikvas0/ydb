@@ -924,15 +924,21 @@ private:
 
     void Prepare(TPrepareSettings&& prepareSettings) override {
         Y_UNUSED(prepareSettings);
-        // TODO: check all tokens closed
-        Closed = true;
+        Close();
     }
 
     void ImmediateCommit() override {
-        Closed = true;
+        Close();
     }
 
     void Rollback() override {
+    }
+
+    void Close() {
+        for (auto& [_, info] : WriteInfos) {
+            info.WriteTableActor->Close();
+        }
+        Closed = true;
     }
 
     i64 GetFreeSpace(TWriteToken token) const override {
