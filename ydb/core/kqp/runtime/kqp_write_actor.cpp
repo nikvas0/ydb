@@ -913,15 +913,18 @@ private:
     void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
         auto& info = WriteInfos.at(token.TableId);
         info.WriteTableActor->Write(token.Cookie,std::move(data));
+        Process();
     }
 
     void Close(TWriteToken token) override {
         auto& info = WriteInfos.at(token.TableId);
         info.WriteTableActor->Close(token.Cookie);
+        Process();
     }
 
     void Prepare(TPrepareSettings&& prepareSettings) override {
         Y_UNUSED(prepareSettings);
+        // TODO: check all tokens closed
         Closed = true;
     }
 
@@ -987,8 +990,8 @@ private:
         }
         if (isFinished) {
             CA_LOG_D("Write actor finished");
-            //Settings.Callbacks->OnCommitted();
-            Settings.Callbacks->OnPrepared();
+            Settings.Callbacks->OnCommitted();
+            //Settings.Callbacks->OnPrepared();
         }
     }
 
@@ -1036,6 +1039,126 @@ private:
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
+
+class TKqpForwardWriteActor : public TActorBootstrapped<TKqpForwardWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput, public IKqpTableWriterCallbacks {
+    using TBase = TActorBootstrapped<TKqpForwardWriteActor>;
+
+public:
+    TKqpForwardWriteActor(
+        NKikimrKqp::TKqpTableSinkSettings&& settings,
+        NYql::NDq::TDqAsyncIoFactory::TSinkArguments&& args,
+        TIntrusivePtr<TKqpCounters> counters)
+        : LogPrefix(TStringBuilder() << "TxId: " << args.TxId << ", task: " << args.TaskId << ". ")
+        , Settings(std::move(settings))
+        , OutputIndex(args.OutputIndex)
+        , Callbacks(args.Callback)
+        , Counters(counters)
+        //, TypeEnv(args.TypeEnv)
+        //, Alloc(args.Alloc)
+        , TxId(std::get<ui64>(args.TxId))
+        , TableId(
+            Settings.GetTable().GetOwnerId(),
+            Settings.GetTable().GetTableId(),
+            Settings.GetTable().GetVersion())
+    {
+        EgressStats.Level = args.StatsLevel;
+    }
+
+    void Bootstrap() {
+        LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+
+        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+        columnsMetadata.reserve(Settings.GetColumns().size());
+        for (const auto & column : Settings.GetColumns()) {
+            columnsMetadata.push_back(column);
+        }
+
+        WriteToken = BufferWriter->Open(IKqpBufferWriter::TWriteSettings{
+            .TableId = TableId,
+            .TablePath = Settings.GetTable().GetPath(),
+            .OperationType = GetOperation(Settings.GetType()),
+            .Columns = std::move(columnsMetadata),
+            .ResumeExecutionCallback = [this]() {
+                Callbacks->ResumeExecution();
+            },
+        });
+    }
+
+    static constexpr char ActorName[] = "KQP_DIRECT_WRITE_ACTOR";
+
+private:
+    virtual ~TKqpForwardWriteActor() {
+    }
+
+    void CommitState(const NYql::NDqProto::TCheckpoint&) final {};
+    void LoadState(const NYql::NDq::TSinkState&) final {};
+
+    ui64 GetOutputIndex() const final {
+        return OutputIndex;
+    }
+
+    const NYql::NDq::TDqAsyncStats& GetEgressStats() const final {
+        return EgressStats;
+    }
+
+    i64 GetFreeSpace() const final {
+        return BufferWriter->GetFreeSpace(WriteToken);
+    }
+
+    TMaybe<google::protobuf::Any> ExtraData() override {
+        google::protobuf::Any result;
+        return result;
+    }
+
+    void SendData(NMiniKQL::TUnboxedValueBatch&& data, i64 size, const TMaybe<NYql::NDqProto::TCheckpoint>&, bool finished) final {
+        YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
+        EgressStats.Resume();
+
+        BufferWriter->Write(WriteToken, std::move(data));
+        EgressStats.Bytes += size;
+        EgressStats.Chunks++;
+        EgressStats.Splits++;
+        EgressStats.Resume();
+
+        if (finished) {
+            BufferWriter->Close(WriteToken);
+            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
+        }
+    }
+
+    void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {}) {
+        NYql::TIssue issue(message);
+        for (const auto& i : subIssues) {
+            issue.AddSubIssue(MakeIntrusive<NYql::TIssue>(i));
+        }
+
+        NYql::TIssues issues;
+        issues.AddIssue(std::move(issue));
+
+        Callbacks->OnAsyncOutputError(OutputIndex, std::move(issues), statusCode);
+    }
+
+    void PassAway() override {
+        TActorBootstrapped<TKqpForwardWriteActor>::PassAway();
+    }
+
+    TString LogPrefix;
+    const NKikimrKqp::TKqpTableSinkSettings Settings;
+    const ui64 OutputIndex;
+    NYql::NDq::TDqAsyncStats EgressStats;
+    NYql::NDq::IDqComputeActorAsyncOutput::ICallbacks * Callbacks = nullptr;
+    TIntrusivePtr<TKqpCounters> Counters;
+    //const NMiniKQL::TTypeEnvironment& TypeEnv;
+    //std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
+
+    IKqpBufferWriter* BufferWriter = nullptr;
+
+    const ui64 TxId;
+    const TTableId TableId;
+
+    IKqpBufferWriter::TWriteToken WriteToken;
+};
+
 
 void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<TKqpCounters> counters) {
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(
