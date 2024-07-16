@@ -23,7 +23,7 @@
 #include <ydb/core/kqp/rm_service/kqp_rm_service.h>
 #include <ydb/public/lib/operation_id/operation_id.h>
 #include <ydb/core/kqp/common/kqp_yql.h>
-
+#include <ydb/core/kqp/runtime/kqp_write_actor.h>
 #include <ydb/core/util/ulid.h>
 
 #include <ydb/core/actorlib_impl/long_timer.h>
@@ -1287,7 +1287,7 @@ public:
             RequestCounters, Settings.TableService,
             AsyncIoFactory, QueryState ? QueryState->PreparedQuery : nullptr, SelfId(),
             QueryState ? QueryState->UserRequestContext : MakeIntrusive<TUserRequestContext>("", Settings.Database, SessionId),
-            Settings.TableService.GetEnableOlapSink(), useEvWrite, QueryState ? QueryState->StatementResultIndex : 0, FederatedQuerySetup, GUCSettings);
+            Settings.TableService.GetEnableOlapSink(), useEvWrite, BufferWriter, QueryState ? QueryState->StatementResultIndex : 0, FederatedQuerySetup, GUCSettings);
 
         auto exId = RegisterWithSameMailbox(executerActor);
         LOG_D("Created new KQP executer: " << exId << " isRollback: " << isRollback);
@@ -2549,6 +2549,8 @@ private:
     bool HasTableWrite = false;
 
     TGUCSettings::TPtr GUCSettings;
+
+    IKqpBufferWriter* BufferWriter = nullptr;
 };
 
 } // namespace

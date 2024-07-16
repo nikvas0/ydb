@@ -9,6 +9,7 @@
 #include <ydb/core/tx/long_tx_service/public/lock_handle.h>
 #include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io_factory.h>
 #include <ydb/core/protos/table_service_config.pb.h>
+#include <ydb/core/kqp/runtime/kqp_write_actor.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -101,7 +102,7 @@ IActor* CreateKqpExecuter(IKqpGateway::TExecPhysicalRequest&& request, const TSt
     const NKikimrConfig::TTableServiceConfig tableServiceConfig,
     NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory, TPreparedQueryHolder::TConstPtr preparedQuery, const TActorId& creator,
     const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-    const bool enableOlapSink, const bool useEvWrite, ui32 statementResultIndex,
+    const bool enableOlapSink, const bool useEvWrite, const IKqpBufferWriter* bufferWriter, ui32 statementResultIndex,
     const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup, const TGUCSettings::TPtr& GUCSettings);
 
 IActor* CreateKqpSchemeExecuter(

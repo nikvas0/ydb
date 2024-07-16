@@ -127,10 +127,11 @@ public:
         const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
         NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory,
         const TActorId& creator, const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-        const bool enableOlapSink, const bool useEvWrite, ui32 statementResultIndex, const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup,
+        const bool enableOlapSink, const bool useEvWrite, const IKqpBufferWriter* bufferWriter,
+        ui32 statementResultIndex, const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup,
         const TGUCSettings::TPtr& GUCSettings)
         : TBase(std::move(request), database, userToken, counters, tableServiceConfig,
-            userRequestContext, statementResultIndex, TWilsonKqp::DataExecuter, "DataExecuter", streamResult)
+            userRequestContext, statementResultIndex, TWilsonKqp::DataExecuter, "DataExecuter", streamResult, bufferWriter)
         , AsyncIoFactory(std::move(asyncIoFactory))
         , EnableOlapSink(enableOlapSink)
         , UseEvWrite(useEvWrite)
@@ -2738,12 +2739,12 @@ IActor* CreateKqpDataExecuter(IKqpGateway::TExecPhysicalRequest&& request, const
     TKqpRequestCounters::TPtr counters, bool streamResult, const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
     NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory, const TActorId& creator,
     const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-    const bool enableOlapSink, const bool useEvWrite, ui32 statementResultIndex,
+    const bool enableOlapSink, const bool useEvWrite, const IKqpBufferWriter* bufferWriter, ui32 statementResultIndex,
     const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup, const TGUCSettings::TPtr& GUCSettings)
 {
     return new TKqpDataExecuter(std::move(request), database, userToken, counters, streamResult, tableServiceConfig,
         std::move(asyncIoFactory), creator, userRequestContext,
-        enableOlapSink, useEvWrite, statementResultIndex, federatedQuerySetup, GUCSettings);
+        enableOlapSink, useEvWrite, bufferWriter, statementResultIndex, federatedQuerySetup, GUCSettings);
 }
 
 } // namespace NKqp

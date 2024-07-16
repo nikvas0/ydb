@@ -26,6 +26,7 @@ struct IKqpBufferWriterCallbacks {
         const NYql::TIssues& subIssues) = 0;
 };
 
+// TODO: move somewhere else
 class IKqpBufferWriter {
 public:
     virtual ~IKqpBufferWriter() = default;

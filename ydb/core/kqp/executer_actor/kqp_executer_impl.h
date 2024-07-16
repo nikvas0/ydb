@@ -125,7 +125,8 @@ public:
         TKqpRequestCounters::TPtr counters,
         const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
         const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-        ui32 statementResultIndex, ui64 spanVerbosity = 0, TString spanName = "KqpExecuterBase", bool streamResult = false)
+        ui32 statementResultIndex, ui64 spanVerbosity = 0, TString spanName = "KqpExecuterBase",
+        bool streamResult = false, const IKqpBufferWriter* bufferWriter = nullptr)
         : Request(std::move(request))
         , Database(database)
         , UserToken(userToken)
@@ -136,6 +137,7 @@ public:
         , AggregationSettings(tableServiceConfig.GetAggregationConfig())
         , HasOlapTable(false)
         , StreamResult(streamResult)
+        , BufferWriter(bufferWriter)
         , StatementResultIndex(statementResultIndex)
     {
         TasksGraph.GetMeta().Snapshot = IKqpGateway::TKqpSnapshot(Request.Snapshot.Step, Request.Snapshot.TxId);
@@ -928,6 +930,7 @@ protected:
                 settings.SetLockTxId(*lockTxId);
                 settings.SetLockNodeId(SelfId().NodeId());
             }
+            settings.SetBufferPtr(reinterpret_cast<ui64>(BufferWriter));
             output.SinkSettings.ConstructInPlace();
             output.SinkSettings->PackFrom(settings);
         } else {
@@ -2001,6 +2004,8 @@ protected:
     bool HasDatashardSourceScan = false;
     bool UnknownAffectedShardCount = false;
 
+    const IKqpBufferWriter* BufferWriter = nullptr;
+
     THashMap<ui64, TActorId> ResultChannelToComputeActor;
     THashMap<NYql::NDq::TStageId, THashMap<ui64, TShardInfo>> SourceScanStageIdToParititions;
 
@@ -2020,7 +2025,7 @@ IActor* CreateKqpDataExecuter(IKqpGateway::TExecPhysicalRequest&& request, const
     const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
     NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory, const TActorId& creator,
     const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-    const bool enableOlapSink, const bool useEvWrite, ui32 statementResultIndex,
+    const bool enableOlapSink, const bool useEvWrite, const IKqpBufferWriter* bufferWriter, ui32 statementResultIndex,
     const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup, const TGUCSettings::TPtr& GUCSettings);
 
 IActor* CreateKqpScanExecuter(IKqpGateway::TExecPhysicalRequest&& request, const TString& database,
