@@ -891,48 +891,66 @@ private:
     TWriteToken Open(TWriteSettings&& settings) override {
         auto& info = WriteInfos[settings.TableId];
 
-        info.WriteTableActor = new TKqpTableWriteActor(
-            this,
-            settings.TableId,
-            settings.TablePath,
-            Settings.TxId,
-            Settings.LockTxId,
-            Settings.LockNodeId,
-            Settings.InconsistentTx,
-            TypeEnv,
-            Alloc);
+        if (!info.WriteTableActor) {
+            info.WriteTableActor = new TKqpTableWriteActor(
+                this,
+                settings.TableId,
+                settings.TablePath,
+                Settings.TxId,
+                Settings.LockTxId,
+                Settings.LockNodeId,
+                Settings.InconsistentTx,
+                TypeEnv,
+                Alloc);
 
-        info.WriteTableActorId = RegisterWithSameMailbox(info.WriteTableActor);
+            info.WriteTableActorId = RegisterWithSameMailbox(info.WriteTableActor);
+        }
 
         auto writeToken = info.WriteTableActor->Open(settings.OperationType, std::move(settings.Columns));
         return {settings.TableId, std::move(writeToken)};
     }
 
     void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
+        auto& info = WriteInfos.at(token.TableId);
+        info.WriteTableActor->Write(token.Cookie,std::move(data));
     }
 
     void Close(TWriteToken token) override {
+        auto& info = WriteInfos.at(token.TableId);
+        info.WriteTableActor->Close(token.Cookie);
     }
 
     void Prepare(TPrepareSettings&& prepareSettings) override {
+        Y_UNUSED(prepareSettings);
+        Closed = true;
     }
 
     void ImmediateCommit() override {
+        Closed = true;
     }
 
     void Rollback() override {
     }
 
-    i64 GetFreeSpace() const override {
-        return (WriteTableActor && WriteTableActor->IsReady())
-            ? MemoryLimit - GetMemory()
+    i64 GetFreeSpace(TWriteToken token) const override {
+        auto& info = WriteInfos.at(token.TableId);
+        return info.WriteTableActor->IsReady()
+            ? MemoryLimit - info.WriteTableActor->GetMemory()
             : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
     }
 
-    i64 GetMemory() const {
-        return (WriteTableActor && WriteTableActor->IsReady())
-            ? WriteTableActor->GetMemory()
-            : 0;
+    i64 GetTotalFreeSpace() const override {
+        return MemoryLimit - GetTotalMemory();
+    }
+
+    i64 GetTotalMemory() const {
+        i64 totalMemory = 0;
+        for (auto& [_, info] : WriteInfos) {
+            totalMemory += info.WriteTableActor->IsReady()
+                ? info.WriteTableActor->GetMemory()
+                : 0;
+        }
+        return totalMemory;
     }
 
     TVector<ui64> GetShardsIds() const override {
@@ -940,23 +958,47 @@ private:
     }
 
     void PassAway() override {
-        WriteTableActor->Terminate();
+        for (auto& [_, info] : WriteInfos) {
+            if (info.WriteTableActor) {
+                info.WriteTableActor->Terminate();
+            }
+        }
         TActorBootstrapped<TKqpDirectWriteActor>::PassAway();
     }
 
     void Process() {
-        if (GetFreeSpace() <= 0) {
+        if (GetTotalFreeSpace() <= 0) {
             OutOfMemory = true;
-        } else if (OutOfMemory && GetFreeSpace() > MemoryLimit / 2) {
+        } else if (OutOfMemory && GetTotalFreeSpace() > MemoryLimit / 2) {
             ResumeExecution();
         }
 
-        if (Closed || GetFreeSpace() <= 0) {
-            WriteTableActor->Flush();
+        if (Closed || GetTotalFreeSpace() <= 0) {
+            for (auto& [_, info] : WriteInfos) {
+                if (info.WriteTableActor->IsReady()) {
+                    info.WriteTableActor->Flush();
+                }
+            }
         }
 
-        if (Closed && WriteTableActor->IsFinished()) {
+        bool isFinished = Closed;
+        for (auto& [_, info] : WriteInfos) {
+            isFinished &= info.WriteTableActor->IsFinished();
+        }
+        if (isFinished) {
             CA_LOG_D("Write actor finished");
+            //Settings.Callbacks->OnCommitted();
+            Settings.Callbacks->OnPrepared();
+        }
+    }
+
+    void ResumeExecution() {
+        CA_LOG_D("Resuming execution.");
+        OutOfMemory = false;
+        for (auto& [_, info] : WriteInfos) {
+            for (auto& [_, callback] : info.ResumeExecutionCallbacks) {
+                callback();
+            }
         }
     }
 
@@ -969,14 +1011,13 @@ private:
     }
 
     void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) override {
-        RuntimeError(message, statusCode, subIssues);
+        Settings.Callbacks->OnRuntimeError(message, statusCode, subIssues);
     }
 
 private:
     TString LogPrefix;
 
     const TKqpBufferWriterSettings Settings;
-    //IKqpBufferWriterCallbacks* Callbacks = nullptr;
 
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
     NMiniKQL::TTypeEnvironment TypeEnv;
@@ -990,6 +1031,8 @@ private:
 
     THashMap<TTableId, TWriteInfo> WriteInfos;
     bool OutOfMemory = false;
+
+    bool Closed = false;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };

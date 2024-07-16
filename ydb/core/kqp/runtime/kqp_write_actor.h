@@ -18,6 +18,12 @@ struct IKqpBufferWriterCallbacks {
     };
 
     virtual void OnPrepared(TPreparedInfo&& preparedInfo) = 0;
+    virtual void OnCommitted() = 0;
+
+    virtual void OnRuntimeError(
+        const TString& message,
+        NYql::NDqProto::StatusIds::StatusCode statusCode,
+        const NYql::TIssues& subIssues) = 0;
 };
 
 class IKqpBufferWriter {
@@ -41,7 +47,8 @@ public:
     virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
     virtual void Close(TWriteToken token) = 0;
 
-    virtual i64 GetFreeSpace() const = 0;
+    virtual i64 GetFreeSpace(TWriteToken token) const = 0;
+    virtual i64 GetTotalFreeSpace() const = 0;
 
     struct TPrepareSettings {
         // External = not EvWrite, for example, topics.
