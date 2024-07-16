@@ -1059,8 +1059,7 @@ public:
         , OutputIndex(args.OutputIndex)
         , Callbacks(args.Callback)
         , Counters(counters)
-        //, TypeEnv(args.TypeEnv)
-        //, Alloc(args.Alloc)
+        , BufferWriter(reinterpret_cast<IKqpBufferWriter*>(settings.GetBufferPtr()))
         , TxId(std::get<ui64>(args.TxId))
         , TableId(
             Settings.GetTable().GetOwnerId(),
@@ -1154,8 +1153,6 @@ private:
     NYql::NDq::TDqAsyncStats EgressStats;
     NYql::NDq::IDqComputeActorAsyncOutput::ICallbacks * Callbacks = nullptr;
     TIntrusivePtr<TKqpCounters> Counters;
-    //const NMiniKQL::TTypeEnvironment& TypeEnv;
-    //std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
     IKqpBufferWriter* BufferWriter = nullptr;
 
@@ -1170,8 +1167,13 @@ void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(
         TString(NYql::KqpTableSinkName),
         [counters] (NKikimrKqp::TKqpTableSinkSettings&& settings, NYql::NDq::TDqAsyncIoFactory::TSinkArguments&& args) {
-            auto* actor = new TKqpDirectWriteActor(std::move(settings), std::move(args), counters);
-            return std::make_pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*>(actor, actor);
+            if (settings.GetBufferPtr() == 0) {
+                auto* actor = new TKqpDirectWriteActor(std::move(settings), std::move(args), counters);
+                return std::make_pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*>(actor, actor);
+            } else {
+                auto* actor = new TKqpDirectWriteActor(std::move(settings), std::move(args), counters);
+                return std::make_pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*>(actor, actor);
+            }
         });
 }
 

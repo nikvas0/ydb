@@ -693,11 +693,11 @@ message TEvKqpOutputActorResultInfo {
     repeated NKikimrDataEvents.TLock Locks = 1;
 }
 
-message TKqpTableSinkLocks {
-    repeated NKikimrDataEvents.TLock Locks = 1;
-    repeated uint64 SendingShards = 2;
-    repeated uint64 ReceivingShards = 3;
-}
+//message TKqpTableSinkLocks {
+//    repeated NKikimrDataEvents.TLock Locks = 1;
+//    repeated uint64 SendingShards = 2;
+//    repeated uint64 ReceivingShards = 3;
+//}
 
 message TKqpTableSinkSettings {
     enum EType {
@@ -717,7 +717,8 @@ message TKqpTableSinkSettings {
     optional bool ImmediateTx = 9; // Try to be immediate tx
     optional bool InconsistentTx = 10; // Write each batch in it's own single immediate tx
     optional EType Type = 11;
-    optional TKqpTableSinkLocks Locks = 12;
+    //optional TKqpTableSinkLocks Locks = 12;
+    optional uint64 BufferPtr = 12;
 }
 
 message TKqpStreamLookupSettings {
