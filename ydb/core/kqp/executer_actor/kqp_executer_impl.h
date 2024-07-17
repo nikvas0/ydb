@@ -161,9 +161,12 @@ public:
         if (Request.CancelAfter) {
             CancelAt = StartTime + *Request.CancelAfter;
         }
-
+        Prepare();
         LOG_T("Bootstrap done, become ReadyState");
         this->Become(&TKqpExecuterBase::ReadyState);
+    }
+
+    virtual void Prepare() {
     }
 
     TActorId SelfId() {

@@ -131,7 +131,7 @@ class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
 public:
     TKqpTableWriteActor(
         IKqpTableWriterCallbacks* callbacks,
-        const TTableId tableId,
+        const TTableId& tableId,
         const TStringBuf tablePath,
         const ui64 txId,
         const ui64 lockTxId,
@@ -150,6 +150,7 @@ public:
         , InconsistentTx(inconsistentTx)
         , Callbacks(callbacks)
     {
+        Cerr << "TA BUILD" << Endl;
         try {
             ShardedWriteController = CreateShardedWriteController(
                 TShardedWriteControllerSettings {
@@ -166,11 +167,14 @@ public:
                 CurrentExceptionMessage(),
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
+        Cerr << "TA BUILD END" << Endl;
     }
 
     void Bootstrap() {
+        Cerr << "TA BOOTSTRAP" << Endl;
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
         ResolveTable();
+        Cerr << "START RESOLVE" << Endl;
         Become(&TKqpTableWriteActor::StateFunc);
     }
 
@@ -183,11 +187,18 @@ public:
     }
 
     bool IsReady() const {
-        return ShardedWriteController != nullptr && ShardedWriteController->IsReady();
+        Cerr << "IsReady: " << ShardedWriteController->IsReady() << Endl;
+        return ShardedWriteController->IsReady();
     }
 
     const THashMap<ui64, TLockInfo>& GetLocks() const {
         return LocksInfo;
+    }
+
+    TVector<ui64> GetShardsIds() const {
+        return (!ShardedWriteController)
+            ? TVector<ui64>()
+            : ShardedWriteController->GetShardsIds();
     }
 
     std::optional<size_t> GetShardsCount() const {
@@ -280,6 +291,7 @@ public:
     }
 
     void ResolveTable() {
+        Cerr << "START RESOLVE " << ResolveAttempts << Endl;
         if (ResolveAttempts++ >= BackoffSettings()->MaxResolveAttempts) {
             const auto error = TStringBuilder()
                 << "Too many table resolve attempts for Sink=" << this->SelfId() << ".";
@@ -304,6 +316,7 @@ public:
     }
 
     void Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev) {
+        Cerr << " RESOLVE FIRST " << ev->Get()->Request->ErrorCount << Endl;
         if (ev->Get()->Request->ErrorCount > 0) {
             CA_LOG_E(TStringBuilder() << "Failed to get table: "
                 << TableId << "'");
@@ -362,6 +375,8 @@ public:
     void Handle(TEvTxProxySchemeCache::TEvResolveKeySetResult::TPtr& ev) {
         YQL_ENSURE(!SchemeRequest || InconsistentTx);
         auto* request = ev->Get()->Request.Get();
+
+        Cerr << " RESOLVE SECOND " << request->ErrorCount << Endl;
 
         if (request->ErrorCount > 0) {
             CA_LOG_E(TStringBuilder() << "Failed to get table: "
@@ -632,6 +647,7 @@ public:
         ResolveAttempts = 0;
 
         try {
+            Cerr << "PREPARE >>>" << Endl;
             if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
                 ShardedWriteController->OnPartitioningChanged(std::move(*SchemeEntry));
             } else {
@@ -713,6 +729,8 @@ public:
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+        Cerr << "TEST" << Settings.GetTable().GetPath() << Endl;
+
         WriteTableActor = new TKqpTableWriteActor(
             this,
             TableId,
@@ -732,7 +750,7 @@ public:
             columnsMetadata.push_back(column);
         }
         WriteToken = WriteTableActor->Open(GetOperation(Settings.GetType()), std::move(columnsMetadata));
-        OutOfMemory = true;
+        WaitingForTableActor = true;
     }
 
     static constexpr char ActorName[] = "KQP_DIRECT_WRITE_ACTOR";
@@ -767,7 +785,7 @@ private:
     TMaybe<google::protobuf::Any> ExtraData() override {
         NKikimrKqp::TEvKqpOutputActorResultInfo resultInfo;
         for (const auto& [_, lockInfo] : WriteTableActor->GetLocks()) {
-            if (const auto& lock = lockInfo.GetLock(); lock) {
+            if (const auto lock = lockInfo.GetLock(); lock) {
                 resultInfo.AddLocks()->CopyFrom(*lock);
             }
         }
@@ -793,8 +811,8 @@ private:
 
     void Process() {
         if (GetFreeSpace() <= 0) {
-            OutOfMemory = true;
-        } else if (OutOfMemory && GetFreeSpace() > MemoryLimit / 2) {
+            WaitingForTableActor = true;
+        } else if (WaitingForTableActor && GetFreeSpace() > MemoryLimit / 2) {
             ResumeExecution();
         }
 
@@ -827,7 +845,7 @@ private:
 
     void ResumeExecution() {
         CA_LOG_D("Resuming execution.");
-        OutOfMemory = false;
+        WaitingForTableActor = false;
         Callbacks->ResumeExecution();
     }
 
@@ -865,12 +883,12 @@ private:
 
     bool Closed = false;
 
-    bool OutOfMemory = false;
+    bool WaitingForTableActor = false;
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
 
-class TKqpBufferWriteActor :public TActorBootstrapped<TKqpDirectWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
-    using TBase = TActorBootstrapped<TKqpDirectWriteActor>;
+class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
+    using TBase = TActorBootstrapped<TKqpBufferWriteActor>;
 
 public:
     TKqpBufferWriteActor(
@@ -891,7 +909,9 @@ private:
     TWriteToken Open(TWriteSettings&& settings) override {
         auto& info = WriteInfos[settings.TableId];
 
+        Cerr << "BUF Open" << Endl;
         if (!info.WriteTableActor) {
+            Cerr << "BUF CREATE" << Endl;
             info.WriteTableActor = new TKqpTableWriteActor(
                 this,
                 settings.TableId,
@@ -907,6 +927,7 @@ private:
         }
 
         auto writeToken = info.WriteTableActor->Open(settings.OperationType, std::move(settings.Columns));
+        WaitingForTableActor = true;
         return {settings.TableId, std::move(writeToken)};
     }
 
@@ -962,8 +983,26 @@ private:
         return totalMemory;
     }
 
-    TVector<ui64> GetShardsIds() const override {
-        return {};
+    THashSet<ui64> GetShardsIds() const override {
+        THashSet<ui64> shardIds;
+        for (auto& [_, info] : WriteInfos) {
+            for (const auto& id : info.WriteTableActor->GetShardsIds()) {
+                shardIds.insert(id);
+            }
+        }
+        return shardIds;
+    }
+
+    THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const override {
+        THashMap<ui64, NKikimrDataEvents::TLock> result;
+        for (const auto& [_, info] : WriteInfos) {
+            for (const auto& [shardId, lockInfo] : info.WriteTableActor->GetLocks()) {
+                if (const auto lock = lockInfo.GetLock(); lock) {
+                    result.emplace(shardId, *lock);
+                }
+            }
+        }
+        return result;
     }
 
     void PassAway() override {
@@ -972,13 +1011,13 @@ private:
                 info.WriteTableActor->Terminate();
             }
         }
-        TActorBootstrapped<TKqpDirectWriteActor>::PassAway();
+        TActorBootstrapped<TKqpBufferWriteActor>::PassAway();
     }
 
     void Process() {
         if (GetTotalFreeSpace() <= 0) {
-            OutOfMemory = true;
-        } else if (OutOfMemory && GetTotalFreeSpace() > MemoryLimit / 2) {
+            WaitingForTableActor = true;
+        } else if (WaitingForTableActor && GetTotalFreeSpace() > MemoryLimit / 2) {
             ResumeExecution();
         }
 
@@ -1003,7 +1042,7 @@ private:
 
     void ResumeExecution() {
         CA_LOG_D("Resuming execution.");
-        OutOfMemory = false;
+        WaitingForTableActor = false;
         for (auto& [_, info] : WriteInfos) {
             for (auto& [_, callback] : info.ResumeExecutionCallbacks) {
                 callback();
@@ -1039,14 +1078,14 @@ private:
     };
 
     THashMap<TTableId, TWriteInfo> WriteInfos;
-    bool OutOfMemory = false;
+    bool WaitingForTableActor = false;
 
     bool Closed = false;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
 
-class TKqpForwardWriteActor : public TActorBootstrapped<TKqpForwardWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput, public IKqpTableWriterCallbacks {
+class TKqpForwardWriteActor : public TActorBootstrapped<TKqpForwardWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput {
     using TBase = TActorBootstrapped<TKqpForwardWriteActor>;
 
 public:
@@ -1059,13 +1098,14 @@ public:
         , OutputIndex(args.OutputIndex)
         , Callbacks(args.Callback)
         , Counters(counters)
-        , BufferWriter(reinterpret_cast<IKqpBufferWriter*>(settings.GetBufferPtr()))
+        , BufferWriter(reinterpret_cast<IKqpBufferWriter*>(Settings.GetBufferPtr()))
         , TxId(std::get<ui64>(args.TxId))
         , TableId(
             Settings.GetTable().GetOwnerId(),
             Settings.GetTable().GetTableId(),
             Settings.GetTable().GetVersion())
     {
+        YQL_ENSURE(BufferWriter != nullptr);
         EgressStats.Level = args.StatsLevel;
     }
 
@@ -1078,6 +1118,8 @@ public:
             columnsMetadata.push_back(column);
         }
 
+        Cerr << "FWD:BOOTSTRAPPED BEGIN" << WriteToken.IsEmpty() << Endl;
+
         WriteToken = BufferWriter->Open(IKqpBufferWriter::TWriteSettings{
             .TableId = TableId,
             .TablePath = Settings.GetTable().GetPath(),
@@ -1087,6 +1129,9 @@ public:
                 Callbacks->ResumeExecution();
             },
         });
+
+        Callbacks->ResumeExecution();
+        Cerr << "FWD:BOOTSTRAPPED " << WriteToken.IsEmpty() << Endl;
     }
 
     static constexpr char ActorName[] = "KQP_DIRECT_WRITE_ACTOR";
@@ -1107,7 +1152,11 @@ private:
     }
 
     i64 GetFreeSpace() const final {
-        return BufferWriter->GetFreeSpace(WriteToken);
+        auto result = WriteToken.IsEmpty()
+            ? std::numeric_limits<i64>::min()
+            : BufferWriter->GetFreeSpace(WriteToken);
+        Cerr << "FWD::GET_FREE_SPACE" << WriteToken.IsEmpty() << " " << result << Endl;
+        return result;
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
@@ -1119,19 +1168,25 @@ private:
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
         EgressStats.Resume();
 
+        Cerr << "FWD::WRITE" << size << " " << finished << Endl;
+
         BufferWriter->Write(WriteToken, std::move(data));
         EgressStats.Bytes += size;
         EgressStats.Chunks++;
         EgressStats.Splits++;
         EgressStats.Resume();
 
+        Cerr << "FWD::WRITE2" << size << " " << finished << Endl;
+
         if (finished) {
+            Cerr << "FWD::FINISHED" << Endl;
             BufferWriter->Close(WriteToken);
             Callbacks->OnAsyncOutputFinished(GetOutputIndex());
         }
     }
 
     void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {}) {
+        Cerr << "FWD::RuntimeError" << Endl;
         NYql::TIssue issue(message);
         for (const auto& i : subIssues) {
             issue.AddSubIssue(MakeIntrusive<NYql::TIssue>(i));
@@ -1162,6 +1217,11 @@ private:
     IKqpBufferWriter::TWriteToken WriteToken;
 };
 
+std::pair<IKqpBufferWriter*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings) {
+    auto* actor = new TKqpBufferWriteActor(std::move(settings));
+    return std::make_pair<IKqpBufferWriter*, NActors::IActor*>(actor, actor);
+}
+
 
 void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<TKqpCounters> counters) {
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(
@@ -1171,7 +1231,7 @@ void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<
                 auto* actor = new TKqpDirectWriteActor(std::move(settings), std::move(args), counters);
                 return std::make_pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*>(actor, actor);
             } else {
-                auto* actor = new TKqpDirectWriteActor(std::move(settings), std::move(args), counters);
+                auto* actor = new TKqpForwardWriteActor(std::move(settings), std::move(args), counters);
                 return std::make_pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*>(actor, actor);
             }
         });

@@ -34,6 +34,10 @@ public:
     struct TWriteToken {
         TTableId TableId;
         ui64 Cookie;
+
+        bool IsEmpty() const {
+            return !TableId;
+        }
     };
 
     struct TWriteSettings {
@@ -52,9 +56,8 @@ public:
     virtual i64 GetTotalFreeSpace() const = 0;
 
     struct TPrepareSettings {
-        // External = not EvWrite, for example, topics.
-        THashSet<ui64> ExternalSendingShards;
-        THashSet<ui64> ExternalReceivingShards;
+        THashSet<ui64> SendingShards;
+        THashSet<ui64> ReceivingShards;
         std::optional<ui64> ArbiterShard;
     };
 
@@ -63,7 +66,8 @@ public:
     virtual void ImmediateCommit() = 0;
     virtual void Rollback() = 0;
 
-    virtual TVector<ui64> GetShardsIds() const = 0;
+    virtual THashSet<ui64> GetShardsIds() const = 0;
+    virtual THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const = 0;
 };
 
 struct TKqpBufferWriterSettings {

@@ -868,25 +868,6 @@ struct TMetadata {
     const TVector<NKikimrKqp::TKqpColumnMetadataProto> InputColumnsMetadata;
 };
 
-/*class TMetadataStorage {
-public:
-    using TToken = ui64;
-
-    TToken Add(const TMetadata& metadata) {
-        ++CurrentToken;
-        Metadata.emplace(CurrentToken, metadata);
-        return CurrentToken;
-    }
-
-    const TMetadata& Get(TToken token) const {
-        return Metadata.at(token);
-    }
-
-private:
-    THashMap<TToken, TMetadata> Metadata;
-    TToken CurrentToken = 0;
-};*/
-
 struct TBatchWithMetadata {
     IShardedWriteController::TWriteToken Token;
     IPayloadSerializer::IBatchPtr Data;
@@ -1081,6 +1062,7 @@ public:
     void OnPartitioningChanged(
         NSchemeCache::TSchemeCacheNavigate::TEntry&& schemeEntry,
         NSchemeCache::TSchemeCacheRequest::TEntry&& partitionsEntry) override {
+        Cerr << "OnPartitioningChanged" << Endl;
         SchemeEntry = std::move(schemeEntry);
         PartitionsEntry = std::move(partitionsEntry);
         BeforePartitioningChanged();
@@ -1175,6 +1157,15 @@ public:
 
     TVector<ui64> GetPendingShards() const override {
         return ShardsInfo.GetPendingShards();
+    }
+
+    TVector<ui64> GetShardsIds() const override {
+        TVector<ui64> result;
+        result.reserve(ShardsInfo.GetShards().size());
+        for (const auto& [id, _] : ShardsInfo.GetShards()) {
+            result.push_back(id);
+        }
+        return result;
     }
 
     std::optional<TMessageMetadata> GetMessageMetadata(ui64 shardId) override {
@@ -1276,6 +1267,7 @@ public:
     bool IsReady() const override {
         for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
             const auto& writeInfo = WriteInfos.at(token);
+            Cerr << "CTL::" << token << " " << (writeInfo.Serializer == nullptr) << Endl;
             if (!writeInfo.Serializer && !writeInfo.Closed) {
                 return false;
             }
