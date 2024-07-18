@@ -1126,10 +1126,12 @@ public:
             .OperationType = GetOperation(Settings.GetType()),
             .Columns = std::move(columnsMetadata),
             .ResumeExecutionCallback = [this]() {
+                Cerr << "RESUME" << Endl;
                 Callbacks->ResumeExecution();
             },
         });
 
+        Cerr << "RESUME2" << Endl;
         Callbacks->ResumeExecution();
         Cerr << "FWD:BOOTSTRAPPED " << WriteToken.IsEmpty() << Endl;
     }
