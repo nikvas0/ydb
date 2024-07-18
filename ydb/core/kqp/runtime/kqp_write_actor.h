@@ -61,6 +61,8 @@ public:
         std::optional<ui64> ArbiterShard;
     };
 
+    virtual void FlushBuffer(TTableId tableId) = 0;
+
     virtual void Prepare(TPrepareSettings&& prepareSettings) = 0;
 
     virtual void ImmediateCommit() = 0;

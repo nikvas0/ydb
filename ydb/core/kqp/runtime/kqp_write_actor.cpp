@@ -252,6 +252,7 @@ public:
         YQL_ENSURE(ShardedWriteController);
         YQL_ENSURE(ShardedWriteController->IsAllWritesClosed());
         Closed = true;
+        ShardedWriteController->Close();
     }
 
     bool IsFinished() const {
@@ -1050,6 +1051,10 @@ private:
         }
     }
 
+    void FlushBuffer(TTableId tableId) override {
+        WriteInfos.at(tableId).WriteTableActor->Flush();
+    }
+
     void OnPrepared() override {
         Process();
     }
@@ -1118,22 +1123,15 @@ public:
             columnsMetadata.push_back(column);
         }
 
-        Cerr << "FWD:BOOTSTRAPPED BEGIN" << WriteToken.IsEmpty() << Endl;
-
         WriteToken = BufferWriter->Open(IKqpBufferWriter::TWriteSettings{
             .TableId = TableId,
             .TablePath = Settings.GetTable().GetPath(),
             .OperationType = GetOperation(Settings.GetType()),
             .Columns = std::move(columnsMetadata),
             .ResumeExecutionCallback = [this]() {
-                Cerr << "RESUME" << Endl;
                 Callbacks->ResumeExecution();
             },
         });
-
-        Cerr << "RESUME2" << Endl;
-        Callbacks->ResumeExecution();
-        Cerr << "FWD:BOOTSTRAPPED " << WriteToken.IsEmpty() << Endl;
     }
 
     static constexpr char ActorName[] = "KQP_DIRECT_WRITE_ACTOR";

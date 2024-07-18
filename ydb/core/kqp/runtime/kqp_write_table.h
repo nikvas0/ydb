@@ -30,6 +30,7 @@ public:
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns) = 0;
     virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
     virtual void Close(TWriteToken token) = 0;
+    virtual void Close() = 0;
 
     virtual TVector<ui64> GetPendingShards() const = 0;
     virtual ui64 GetShardsCount() const = 0;

@@ -1152,6 +1152,9 @@ public:
         WriteInfos.at(token).Serializer->Close();
         FlushSerializer(token, true);
         YQL_ENSURE(WriteInfos.at(token).Serializer->IsFinished());
+    }
+
+    void Close() override {
         ShardsInfo.Close();
     }
 
