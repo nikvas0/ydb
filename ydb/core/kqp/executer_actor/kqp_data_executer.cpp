@@ -127,7 +127,7 @@ public:
         const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
         NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory,
         const TActorId& creator, const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-        const bool enableOlapSink, const bool useEvWrite, const IKqpBufferWriter* bufferWriter,
+        const bool enableOlapSink, const bool useEvWrite, IKqpBufferWriter* bufferWriter,
         ui32 statementResultIndex, const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup,
         const TGUCSettings::TPtr& GUCSettings)
         : TBase(std::move(request), database, userToken, counters, tableServiceConfig,
@@ -150,6 +150,7 @@ public:
     }
 
     void Prepare() override {
+        // todo: delete
     }
 
     void CheckExecutionComplete() {
@@ -243,6 +244,8 @@ public:
     }
 
     void Finalize() {
+        BufferWriter->Flush();
+
         if (LocksBroken) {
             TString message = "Transaction locks invalidated.";
 
@@ -2744,7 +2747,7 @@ IActor* CreateKqpDataExecuter(IKqpGateway::TExecPhysicalRequest&& request, const
     TKqpRequestCounters::TPtr counters, bool streamResult, const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
     NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory, const TActorId& creator,
     const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-    const bool enableOlapSink, const bool useEvWrite, const IKqpBufferWriter* bufferWriter, ui32 statementResultIndex,
+    const bool enableOlapSink, const bool useEvWrite, IKqpBufferWriter* bufferWriter, ui32 statementResultIndex,
     const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup, const TGUCSettings::TPtr& GUCSettings)
 {
     return new TKqpDataExecuter(std::move(request), database, userToken, counters, streamResult, tableServiceConfig,

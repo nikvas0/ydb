@@ -75,6 +75,24 @@ namespace {
         std::optional<NKikimrDataEvents::TLock> Lock;
     };
 
+    class TLocksManager {
+    public:
+        void AddLock(ui64 shardId, const NKikimrDataEvents::TLock& lock) {
+            Locks[shardId].AddAndCheckLock(lock);
+        }
+
+        const std::optional<NKikimrDataEvents::TLock>& GetLock(ui64 shardId) const {
+            return Locks.at(shardId).GetLock();
+        }
+
+        const THashMap<ui64, TLockInfo>& GetLocks() const {
+            return Locks;
+        }
+
+    private:
+        THashMap<ui64, TLockInfo> Locks;
+    };
+
     NKikimrDataEvents::TEvWrite::TOperation::EOperationType GetOperation(NKikimrKqp::TKqpTableSinkSettings::EType type) {
         switch (type) {
         case NKikimrKqp::TKqpTableSinkSettings::MODE_REPLACE:
@@ -150,7 +168,6 @@ public:
         , InconsistentTx(inconsistentTx)
         , Callbacks(callbacks)
     {
-        Cerr << "TA BUILD" << Endl;
         try {
             ShardedWriteController = CreateShardedWriteController(
                 TShardedWriteControllerSettings {
@@ -167,14 +184,11 @@ public:
                 CurrentExceptionMessage(),
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
-        Cerr << "TA BUILD END" << Endl;
     }
 
     void Bootstrap() {
-        Cerr << "TA BOOTSTRAP" << Endl;
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
         ResolveTable();
-        Cerr << "START RESOLVE" << Endl;
         Become(&TKqpTableWriteActor::StateFunc);
     }
 
@@ -187,12 +201,11 @@ public:
     }
 
     bool IsReady() const {
-        Cerr << "IsReady: " << ShardedWriteController->IsReady() << Endl;
         return ShardedWriteController->IsReady();
     }
 
     const THashMap<ui64, TLockInfo>& GetLocks() const {
-        return LocksInfo;
+        return LocksManager.GetLocks();
     }
 
     TVector<ui64> GetShardsIds() const {
@@ -292,7 +305,6 @@ public:
     }
 
     void ResolveTable() {
-        Cerr << "START RESOLVE " << ResolveAttempts << Endl;
         if (ResolveAttempts++ >= BackoffSettings()->MaxResolveAttempts) {
             const auto error = TStringBuilder()
                 << "Too many table resolve attempts for Sink=" << this->SelfId() << ".";
@@ -532,7 +544,7 @@ public:
             << ", LocksCount=" << ev->Get()->Record.GetTxLocks().size());
 
         for (const auto& lock : ev->Get()->Record.GetTxLocks()) {
-            LocksInfo[ev->Get()->Record.GetOrigin()].AddAndCheckLock(lock);
+            LocksManager.AddLock(ev->Get()->Record.GetOrigin(), lock);
         }
 
         const auto removedDataSize = ShardedWriteController->OnMessageAcknowledged(
@@ -543,7 +555,6 @@ public:
     }
 
     void Flush() {
-        // Flush can send data only partially.
         for (const size_t shardId : ShardedWriteController->GetPendingShards()) {
             SendDataToShard(shardId);
         }
@@ -571,13 +582,14 @@ public:
         
         if (false && Closed && metadata->IsFinal) {
             // Last immediate write (only for datashard)
-            if (LocksInfo[shardId].GetLock()) {
+            const auto lock = LocksManager.GetLock(shardId);
+            if (lock) {
                 // multi immediate evwrite
                 auto* locks = evWrite->Record.MutableLocks();
                 locks->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
                 locks->AddSendingShards(shardId);
                 locks->AddReceivingShards(shardId);
-                *locks->AddLocks() = *LocksInfo.at(shardId).GetLock();
+                *locks->AddLocks() = *lock;
             }
         } else if (!InconsistentTx) {
             evWrite->SetLockId(LockTxId, LockNodeId);
@@ -648,7 +660,6 @@ public:
         ResolveAttempts = 0;
 
         try {
-            Cerr << "PREPARE >>>" << Endl;
             if (SchemeEntry->Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
                 ShardedWriteController->OnPartitioningChanged(std::move(*SchemeEntry));
             } else {
@@ -675,6 +686,7 @@ public:
     }
 
     void Terminate() {
+        // TODO: Change to message
         PassAway();
     }
 
@@ -698,7 +710,7 @@ public:
     std::optional<NSchemeCache::TSchemeCacheRequest::TEntry> SchemeRequest;
     ui64 ResolveAttempts = 0;
 
-    THashMap<ui64, TLockInfo> LocksInfo;
+    TLocksManager LocksManager;
     bool Closed = false;
 
     IShardedWriteControllerPtr ShardedWriteController = nullptr;
@@ -891,13 +903,24 @@ private:
 class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpBufferWriteActor>;
 
+    enum class EState {
+        WAITING,
+        WRITING,
+        FLUSHING,
+        PREPARING,
+        COMMITTING,
+        ROLLBACK,
+    };
+
 public:
     TKqpBufferWriteActor(
         TKqpBufferWriterSettings&& settings)
         : Settings(std::move(settings))
         , Alloc(std::make_shared<NKikimr::NMiniKQL::TScopedAlloc>(__LOCATION__))
-        , TypeEnv(*Alloc) {
+        , TypeEnv(*Alloc)
+    {
         Alloc->Release();
+        State = EState::WRITING;
     }
 
     void Bootstrap() {
@@ -908,11 +931,10 @@ public:
 
 private:
     TWriteToken Open(TWriteSettings&& settings) override {
-        auto& info = WriteInfos[settings.TableId];
+        YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
 
-        Cerr << "BUF Open" << Endl;
+        auto& info = WriteInfos[settings.TableId];
         if (!info.WriteTableActor) {
-            Cerr << "BUF CREATE" << Endl;
             info.WriteTableActor = new TKqpTableWriteActor(
                 this,
                 settings.TableId,
@@ -925,42 +947,49 @@ private:
                 Alloc);
 
             info.WriteTableActorId = RegisterWithSameMailbox(info.WriteTableActor);
+            State = EState::WAITING;
         }
 
         auto writeToken = info.WriteTableActor->Open(settings.OperationType, std::move(settings.Columns));
-        WaitingForTableActor = true;
         return {settings.TableId, std::move(writeToken)};
     }
 
     void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
+        YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
+
         auto& info = WriteInfos.at(token.TableId);
         info.WriteTableActor->Write(token.Cookie,std::move(data));
         Process();
     }
 
     void Close(TWriteToken token) override {
+        YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
+
         auto& info = WriteInfos.at(token.TableId);
         info.WriteTableActor->Close(token.Cookie);
         Process();
     }
 
     void Prepare(TPrepareSettings&& prepareSettings) override {
+        YQL_ENSURE(State == EState::WRITING);
         Y_UNUSED(prepareSettings);
         Close();
     }
 
     void ImmediateCommit() override {
+        YQL_ENSURE(State == EState::WRITING);
         Close();
     }
 
     void Rollback() override {
+        YQL_ENSURE(State == EState::WRITING);
     }
 
     void Close() {
+        YQL_ENSURE(State == EState::WRITING);
         for (auto& [_, info] : WriteInfos) {
             info.WriteTableActor->Close();
         }
-        Closed = true;
     }
 
     i64 GetFreeSpace(TWriteToken token) const override {
@@ -1017,12 +1046,16 @@ private:
 
     void Process() {
         if (GetTotalFreeSpace() <= 0) {
-            WaitingForTableActor = true;
-        } else if (WaitingForTableActor && GetTotalFreeSpace() > MemoryLimit / 2) {
+            State = EState::WAITING;
+        } else if (State == EState::WAITING && GetTotalFreeSpace() > MemoryLimit / 2) {
             ResumeExecution();
         }
 
-        if (Closed || GetTotalFreeSpace() <= 0) {
+        const bool closed = (State == EState::FLUSHING
+            || State == EState::PREPARING
+            || State == EState::COMMITTING);
+
+        if (closed || GetTotalFreeSpace() <= 0) {
             for (auto& [_, info] : WriteInfos) {
                 if (info.WriteTableActor->IsReady()) {
                     info.WriteTableActor->Flush();
@@ -1030,20 +1063,33 @@ private:
             }
         }
 
-        bool isFinished = Closed;
+        bool isFinished = true;
         for (auto& [_, info] : WriteInfos) {
             isFinished &= info.WriteTableActor->IsFinished();
         }
         if (isFinished) {
             CA_LOG_D("Write actor finished");
-            Settings.Callbacks->OnCommitted();
-            //Settings.Callbacks->OnPrepared();
+            switch (State) {
+                case EState::PREPARING:
+                    //Settings.Callbacks->OnPrepared();
+                    break;
+                case EState::COMMITTING:
+                    Settings.Callbacks->OnCommitted();
+                    break;
+                case EState::ROLLBACK:
+                    //Settings.Callbacks->OnRollBack();
+                    break;
+                case EState::FLUSHING:
+                    break;
+                default:
+                    YQL_ENSURE(false);
+            }
         }
     }
 
     void ResumeExecution() {
         CA_LOG_D("Resuming execution.");
-        WaitingForTableActor = false;
+        State = EState::WRITING;
         for (auto& [_, info] : WriteInfos) {
             for (auto& [_, callback] : info.ResumeExecutionCallbacks) {
                 callback();
@@ -1051,8 +1097,12 @@ private:
         }
     }
 
-    void FlushBuffer(TTableId tableId) override {
-        WriteInfos.at(tableId).WriteTableActor->Flush();
+    void Flush() override {
+        State = EState::FLUSHING;
+        for (auto& [_, info] : WriteInfos) {
+            info.WriteTableActor->Close();
+        }
+        Process();
     }
 
     void OnPrepared() override {
@@ -1083,9 +1133,8 @@ private:
     };
 
     THashMap<TTableId, TWriteInfo> WriteInfos;
-    bool WaitingForTableActor = false;
 
-    bool Closed = false;
+    EState State;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };

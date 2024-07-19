@@ -61,11 +61,13 @@ public:
         std::optional<ui64> ArbiterShard;
     };
 
-    virtual void FlushBuffer(TTableId tableId) = 0;
+    //virtual void FlushBuffer(TTableId tableId) = 0;
 
+    // Only when all writes are closed!
+    virtual void Flush() = 0;
     virtual void Prepare(TPrepareSettings&& prepareSettings) = 0;
-
     virtual void ImmediateCommit() = 0;
+
     virtual void Rollback() = 0;
 
     virtual THashSet<ui64> GetShardsIds() const = 0;
