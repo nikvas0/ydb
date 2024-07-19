@@ -2467,10 +2467,9 @@ private:
 
         const bool singlePartitionOptAllowed = !HasOlapTable && !UnknownAffectedShardCount && !HasExternalSources && DatashardTxs.empty() && EvWriteTxs.empty();
         const bool useDataQueryPool = !(HasExternalSources && DatashardTxs.empty() && EvWriteTxs.empty());
-        const bool localComputeTasks = true; //!DatashardTxs.empty();
-        const bool mayRunTasksLocally = true; //!((HasExternalSources || HasOlapTable || HasDatashardSourceScan) && DatashardTxs.empty());
+        const bool localComputeTasks = !DatashardTxs.empty();
+        const bool mayRunTasksLocally = !((HasExternalSources || HasOlapTable || HasDatashardSourceScan) && DatashardTxs.empty());
 
-        Cerr << "localComputeTasks" << localComputeTasks << Endl;
         Planner = CreateKqpPlanner({
             .TasksGraph = TasksGraph,
             .TxId = TxId,

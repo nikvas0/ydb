@@ -1098,11 +1098,11 @@ private:
     }
 
     void Flush() override {
-        State = EState::FLUSHING;
-        for (auto& [_, info] : WriteInfos) {
-            info.WriteTableActor->Close();
-        }
-        Process();
+        //State = EState::FLUSHING;
+        //for (auto& [_, info] : WriteInfos) {
+        //    info.WriteTableActor->Close();
+        //}
+        //Process();
     }
 
     void OnPrepared() override {
