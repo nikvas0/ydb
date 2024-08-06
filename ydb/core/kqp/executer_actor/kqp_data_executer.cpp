@@ -244,7 +244,7 @@ public:
     }
 
     void Finalize() {
-        BufferWriter->Flush();
+        BufferWriter->Flush(nullptr);
 
         if (LocksBroken) {
             TString message = "Transaction locks invalidated.";

@@ -146,6 +146,12 @@ class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
         };
     };
 
+    //enum class EState {
+    //    WRITING,
+    //    FLUSHING,
+    //    FINISHING /* = COMMITTING || ROLLINGBACK || PREPARING */,
+    //};
+
 public:
     TKqpTableWriteActor(
         IKqpTableWriterCallbacks* callbacks,
@@ -268,8 +274,12 @@ public:
         ShardedWriteController->Close();
     }
 
+    bool IsClosed() const {
+        return Closed;
+    }
+
     bool IsFinished() const {
-        return Closed && ShardedWriteController->IsAllWritesFinished();
+        return IsClosed() && ShardedWriteController->IsAllWritesFinished();
     }
 
     STFUNC(StateFunc) {
@@ -909,7 +919,7 @@ class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, pub
         FLUSHING,
         PREPARING,
         COMMITTING,
-        ROLLBACK,
+        ROLLINGBACK,
     };
 
 public:
@@ -970,19 +980,30 @@ private:
         Process();
     }
 
-    void Prepare(TPrepareSettings&& prepareSettings) override {
+    void Flush(std::unique_ptr<IOnFlushedCallback>&& callback) override {
+        State = EState::FLUSHING;
+        //for (auto& [_, info] : WriteInfos) {
+        //    YQL_ENSURE(info.WriteTableActor->IsClosed());
+        //}
+        OnFlushedCallback = std::move(callback);
+        Process();
+    }
+
+    void Prepare(std::unique_ptr<IOnPreparedCallback>&& callback, TPrepareSettings&& prepareSettings) override {
         YQL_ENSURE(State == EState::WRITING);
-        Y_UNUSED(prepareSettings);
+        Y_UNUSED(callback, prepareSettings);
         Close();
     }
 
-    void ImmediateCommit() override {
+    void ImmediateCommit(std::unique_ptr<IOnCommittedCallback>&& callback) override {
         YQL_ENSURE(State == EState::WRITING);
+        Y_UNUSED(callback);
         Close();
     }
 
-    void Rollback() override {
+    void Rollback(std::unique_ptr<IOnRolledBackCallback>&& callback) override {
         YQL_ENSURE(State == EState::WRITING);
+        Y_UNUSED(callback);
     }
 
     void Close() {
@@ -1074,12 +1095,14 @@ private:
                     //Settings.Callbacks->OnPrepared();
                     break;
                 case EState::COMMITTING:
-                    Settings.Callbacks->OnCommitted();
+                    //Settings.Callbacks->OnCommitted();
                     break;
-                case EState::ROLLBACK:
-                    //Settings.Callbacks->OnRollBack();
+                case EState::ROLLINGBACK:
+                    //Settings.Callbacks->OnRolledBack();
                     break;
                 case EState::FLUSHING:
+                    //Settings.Callbacks->OnFlushed();
+                    //(*OnFlushedCallback)();
                     break;
                 default:
                     YQL_ENSURE(false);
@@ -1095,14 +1118,6 @@ private:
                 callback();
             }
         }
-    }
-
-    void Flush() override {
-        //State = EState::FLUSHING;
-        //for (auto& [_, info] : WriteInfos) {
-        //    info.WriteTableActor->Close();
-        //}
-        //Process();
     }
 
     void OnPrepared() override {
@@ -1135,6 +1150,7 @@ private:
     THashMap<TTableId, TWriteInfo> WriteInfos;
 
     EState State;
+    std::unique_ptr<IOnFlushedCallback> OnFlushedCallback;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
