@@ -48,11 +48,7 @@ public:
     virtual i64 GetTotalFreeSpace() const = 0;
 
     // Only when all writes are closed!
-    struct IOnFlushedCallback {
-        virtual ~IOnFlushedCallback() {}
-        virtual void operator()() = 0;
-    };
-    virtual void Flush(std::unique_ptr<IOnFlushedCallback>&& callback) = 0;
+    virtual void Flush(std::function<void()> callback) = 0;
     //virtual void Flush(TTableId tableId) = 0;
 
     struct TPrepareSettings {
@@ -68,26 +64,14 @@ public:
         TVector<ui64> Coordinators;
     };
 
-    struct IOnPreparedCallback {
-        virtual ~IOnPreparedCallback() {}
-        virtual void operator()(TPreparedInfo&& preparedInfo) = 0;
-    };
-    virtual void Prepare(std::unique_ptr<IOnPreparedCallback>&& callback, TPrepareSettings&& prepareSettings) = 0;
-
-    struct IOnCommittedCallback {
-        virtual ~IOnCommittedCallback() {}
-        virtual void operator()() = 0;
-    };
-    virtual void ImmediateCommit(std::unique_ptr<IOnCommittedCallback>&& callback) = 0;
-
-    struct IOnRolledBackCallback {
-        virtual ~IOnRolledBackCallback() {}
-        virtual void operator()() = 0;
-    };
-    virtual void Rollback(std::unique_ptr<IOnRolledBackCallback>&& callback) = 0;
+    virtual void Prepare(std::function<void(TPreparedInfo&& preparedInfo)> callback, TPrepareSettings&& prepareSettings) = 0;
+    virtual void ImmediateCommit(std::function<void()> callback) = 0;
+    virtual void Rollback(std::function<void()> callback) = 0;
 
     virtual THashSet<ui64> GetShardsIds() const = 0;
     virtual THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const = 0;
+
+    virtual bool IsFinished() const = 0;
 };
 
 struct TKqpBufferWriterSettings {
