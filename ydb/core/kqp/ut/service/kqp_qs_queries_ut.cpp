@@ -3388,12 +3388,14 @@ Y_UNIT_TEST_SUITE(KqpQueryService) {
                 CompareYson(output, R"([[0u;[0];#];[1u;#;["test"]];[2u;[3];["t"]]])");
             }
 
+            Cerr << "BEFORE" << Endl;
             {
                 auto it = client.ExecuteQuery(R"(
                 DELETE FROM `/Root/DataShard` WHERE Col3 == 't';
-            )", NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+            )", NYdb::NQuery::TTxControl::BeginTx().CommitTx(), NYdb::NQuery::TExecuteQuerySettings().ClientTimeout(TDuration::Seconds(10))).ExtractValueSync();
                 UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
             }
+            Cerr << "AFTER" << Endl;
             {
                 auto it = client.StreamExecuteQuery(R"(
                 SELECT * FROM `/Root/DataShard` ORDER BY Col1;

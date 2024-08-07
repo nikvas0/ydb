@@ -132,6 +132,7 @@ class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
         enum EEv {
             EvShardRequestTimeout = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
             EvResolveRequestPlanned,
+            EvTerminate,
         };
 
         struct TEvShardRequestTimeout : public TEventLocal<TEvShardRequestTimeout, EvShardRequestTimeout> {
@@ -143,6 +144,9 @@ class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
         };
 
         struct TEvResolveRequestPlanned : public TEventLocal<TEvResolveRequestPlanned, EvResolveRequestPlanned> {
+        };
+
+        struct TEvTerminate : public TEventLocal<TEvTerminate, EvTerminate> {
         };
     };
 
@@ -174,6 +178,7 @@ public:
         , InconsistentTx(inconsistentTx)
         , Callbacks(callbacks)
     {
+        Cerr << "CREATED WRITE ACTOR:: " << this->SelfId() << Endl;
         try {
             ShardedWriteController = CreateShardedWriteController(
                 TShardedWriteControllerSettings {
@@ -194,8 +199,9 @@ public:
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+        Cerr << "WRITE ACTOR:: " << this->SelfId() << " POOL " << this->SelfId().PoolID() << Endl;
         ResolveTable();
-        Become(&TKqpTableWriteActor::StateFunc);
+        Become(&TKqpTableWriteActor::StateProcessing);
     }
 
     static constexpr char ActorName[] = "KQP_TABLE_WRITE_ACTOR";
@@ -282,7 +288,7 @@ public:
         return IsClosed() && ShardedWriteController->IsAllWritesFinished();
     }
 
-    STFUNC(StateFunc) {
+    STFUNC(StateProcessing) {
         try {
             switch (ev->GetTypeRewrite()) {
                 hFunc(NKikimr::NEvents::TDataEvents::TEvWriteResult, Handle);
@@ -290,12 +296,17 @@ public:
                 hFunc(TEvTxProxySchemeCache::TEvResolveKeySetResult, Handle);
                 hFunc(TEvPipeCache::TEvDeliveryProblem, Handle);
                 hFunc(TEvPrivate::TEvShardRequestTimeout, Handle);
+                hFunc(TEvPrivate::TEvTerminate, Handle);
                 IgnoreFunc(TEvInterconnect::TEvNodeConnected);
                 IgnoreFunc(TEvTxProxySchemeCache::TEvInvalidateTableResult);
             }
         } catch (const yexception& e) {
             RuntimeError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
+    }
+
+    STFUNC(StateTerminating) {
+        Y_UNUSED(ev);
     }
 
     bool IsResolving() const {
@@ -622,6 +633,7 @@ public:
         ShardedWriteController->OnMessageSent(shardId, metadata->Cookie);
 
         if (InconsistentTx) {
+            Cerr << "TEvShardRequestTimeout" << Endl;
             TlsActivationContext->Schedule(
                 CalculateNextAttemptDelay(metadata->SendAttempts),
                 new IEventHandle(
@@ -652,6 +664,11 @@ public:
         CA_LOG_W("Timeout shardID=" << ev->Get()->ShardId);
         YQL_ENSURE(InconsistentTx);
         RetryShard(ev->Get()->ShardId, ev->Cookie);
+    }
+
+    void Handle(TEvPrivate::TEvTerminate::TPtr&) {
+        Become(&TKqpTableWriteActor::StateTerminating);
+        PassAway();
     }
 
     void Handle(TEvPipeCache::TEvDeliveryProblem::TPtr& ev) {
@@ -691,13 +708,14 @@ public:
     }
 
     void PassAway() override {;
+        Cerr << "PassAway>> WRITE ACTOR:: " << this->SelfId() << " POOL " << this->SelfId().PoolID() << Endl;
         Send(PipeCacheId, new TEvPipeCache::TEvUnlink(0));
         TActorBootstrapped<TKqpTableWriteActor>::PassAway();
     }
 
     void Terminate() {
-        // TODO: Change to message
-        PassAway();
+        Cerr << "WRITE ACTOR:: SEND TERMINATE" << Endl;
+        Send(this->SelfId(), new TEvPrivate::TEvTerminate{});
     }
 
     NActors::TActorId PipeCacheId = NKikimr::MakePipePerNodeCacheID(false);
@@ -913,6 +931,15 @@ private:
 class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpBufferWriteActor>;
 
+    struct TEvPrivate {
+        enum EEv {
+            EvTerminate = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
+        };
+
+        struct TEvTerminate : public TEventLocal<TEvTerminate, EvTerminate> {
+        };
+    };
+
     enum class EState {
         WAITING, // Out of memory, wait for free memory. Can't accept any writes in this state.
         WRITING, // Allow to write data to buffer (there is free memory).
@@ -936,11 +963,18 @@ public:
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+        Become(&TKqpBufferWriteActor::StateFunc);
     }
 
     static constexpr char ActorName[] = "KQP_BUFFER_WRITE_ACTOR";
 
 private:
+    STFUNC(StateFunc) {
+        switch (ev->GetTypeRewrite()) {
+            hFunc(TEvPrivate::TEvTerminate, Handle);
+        }
+    }
+
     TWriteToken Open(TWriteSettings&& settings) override {
         YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
 
@@ -956,8 +990,8 @@ private:
                 Settings.InconsistentTx,
                 TypeEnv,
                 Alloc);
-
             info.WriteTableActorId = RegisterWithSameMailbox(info.WriteTableActor);
+            Cerr << "OPEN NEW ACTOR :: " << info.WriteTableActorId << Endl;
             State = EState::WAITING;
         }
 
@@ -1062,11 +1096,21 @@ private:
 
     void PassAway() override {
         for (auto& [_, info] : WriteInfos) {
+            Cerr << "FOUND WRITE ACTOR: " << info.WriteTableActorId << Endl;
             if (info.WriteTableActor) {
+                Cerr << "TERMINATE WRITE ACTOR " << info.WriteTableActorId << Endl;
                 info.WriteTableActor->Terminate();
             }
         }
         TActorBootstrapped<TKqpBufferWriteActor>::PassAway();
+    }
+
+    void Handle(TEvPrivate::TEvTerminate::TPtr&) {
+        PassAway();
+    }
+
+    void Terminate() override {
+        Send(SelfId(), new TEvPrivate::TEvTerminate{});
     }
 
     void Process() {
@@ -1197,6 +1241,7 @@ public:
             columnsMetadata.push_back(column);
         }
 
+        Cerr << "FWD:: OPEN" << Endl;
         WriteToken = BufferWriter->Open(IKqpBufferWriter::TWriteSettings{
             .TableId = TableId,
             .TablePath = Settings.GetTable().GetPath(),

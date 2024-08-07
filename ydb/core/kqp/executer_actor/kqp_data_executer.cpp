@@ -150,7 +150,7 @@ public:
     }
 
     void Prepare() override {
-        // todo: delete
+        // TODO :REMOVE
     }
 
     void CheckExecutionComplete() {
@@ -244,9 +244,13 @@ public:
     }
 
     void Finalize() {
-        BufferWriter->Flush([this]() {
+        if (BufferWriter) {
+            BufferWriter->Flush([this]() {
+                Finalize2();
+            });
+        } else {
             Finalize2();
-        });
+        }
     }
 
     void Finalize2() {
@@ -1845,8 +1849,40 @@ private:
         return NKqp::HasOlapTableWriteInStage(stage, tables);
     }
 
+    void PrepareBufferWriter() {
+        struct TBufferWriterCallbacks : public IKqpBufferWriterCallbacks {
+            void OnRuntimeError(
+                const TString& message,
+                NYql::NDqProto::StatusIds::StatusCode statusCode,
+                const NYql::TIssues& subIssues) override {
+
+                NYql::TIssue issue(message);
+                for (const auto& i : subIssues) {
+                    issue.AddSubIssue(MakeIntrusive<NYql::TIssue>(i));
+                }
+
+                Executer->ReplyErrorAndDie(DqStatusToYdbStatus(statusCode), issue);
+            }
+
+            TBufferWriterCallbacks(TKqpDataExecuter* executer)
+                : Executer(executer) {}
+
+            TKqpDataExecuter* Executer;
+        };
+        BufferWriterCallbacks = std::make_unique<TBufferWriterCallbacks>(this);
+        auto [writer, actor] = CreateKqpBufferWriterActor(TKqpBufferWriterSettings{
+            .Callbacks = BufferWriterCallbacks.get(),
+        });
+        BufferWriter = writer;
+        RegisterWithSameMailbox(actor);
+    }
+
     void Execute() {
         LWTRACK(KqpDataExecuterStartExecute, ResponseEv->Orbit, TxId);
+
+        if (UseEvWrite && !ReadOnlyTx) {
+            PrepareBufferWriter();
+        }
 
         size_t sourceScanPartitionsCount = 0;
         for (ui32 txIdx = 0; txIdx < Request.Transactions.size(); ++txIdx) {
@@ -2653,6 +2689,10 @@ private:
             Send(MakePipePerNodeCacheID(true), new TEvPipeCache::TEvUnlink(0));
         }
 
+        if (BufferWriter) {
+            BufferWriter->Terminate();
+        }
+
         TBase::PassAway();
     }
 
@@ -2738,6 +2778,7 @@ private:
     TDatashardTxs DatashardTxs;
     TEvWriteTxs EvWriteTxs;
     TTopicTabletTxs TopicTxs;
+    std::unique_ptr<IKqpBufferWriterCallbacks> BufferWriterCallbacks = nullptr;
 
     // Lock handle for a newly acquired lock
     TLockHandle LockHandle;

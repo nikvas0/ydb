@@ -72,6 +72,8 @@ public:
     virtual THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const = 0;
 
     virtual bool IsFinished() const = 0;
+
+    virtual void Terminate() = 0;
 };
 
 struct TKqpBufferWriterSettings {

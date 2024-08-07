@@ -1055,6 +1055,12 @@ public:
                     || QueryState->Commit && !QueryState->Commited;
 
         if (!haveWork) {
+            /*if (BufferWriter) {
+                Cerr << "TEST:: TERMINATE BUFFER WRITER" << Endl;
+                YQL_ENSURE(BufferWriter->IsFinished());
+                BufferWriter->Terminate();
+                BufferWriter = nullptr;
+            }*/
             ReplySuccess();
             return;
         }
@@ -1282,11 +1288,11 @@ public:
         const bool useEvWrite = ((HasOlapTable && Settings.TableService.GetEnableOlapSink()) || (!HasOlapTable && Settings.TableService.GetEnableOltpSink()))
             && (request.QueryType == NKikimrKqp::EQueryType::QUERY_TYPE_SQL_GENERIC_QUERY
                 || request.QueryType == NKikimrKqp::EQueryType::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY);
-        if (useEvWrite && (!BufferWriter || BufferWriter->IsFinished()) /*&& !ReadOnlyTx*/) {
+        /*if (useEvWrite && !BufferWriter) { //&& !ReadOnlyTx) {
             auto [writer, actor] = CreateKqpBufferWriterActor(TKqpBufferWriterSettings{});
             RegisterWithSameMailbox(actor);
             BufferWriter = writer;
-        }
+        }*/
         auto executerActor = CreateKqpExecuter(std::move(request), Settings.Database,
             QueryState ? QueryState->UserToken : TIntrusiveConstPtr<NACLib::TUserToken>(),
             RequestCounters, Settings.TableService,
