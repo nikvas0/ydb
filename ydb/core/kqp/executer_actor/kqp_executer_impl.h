@@ -516,6 +516,8 @@ protected:
             lockTxId = TxId;
         }
 
+        Cerr << "HandleReady " << lockTxId  << " " << TxId << Endl;
+
         TasksGraph.GetMeta().SetLockTxId(lockTxId);
 
         LWTRACK(KqpBaseExecuterHandleReady, ResponseEv->Orbit, TxId);

@@ -43,6 +43,7 @@ public:
     virtual TWriteToken Open(TWriteSettings&& settings) = 0;
     virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
     virtual void Close(TWriteToken token) = 0;
+    virtual THashMap<ui64, NKikimrDataEvents::TLock> GetLocks(TWriteToken token) const = 0;
 
     virtual i64 GetFreeSpace(TWriteToken token) const = 0;
     virtual i64 GetTotalFreeSpace() const = 0;
@@ -77,11 +78,11 @@ public:
 };
 
 struct TKqpBufferWriterSettings {
-    ui64 TxId;
-    ui64 LockTxId;
-    ui64 LockNodeId;
-    bool InconsistentTx;
-    IKqpBufferWriterCallbacks* Callbacks;
+    ui64 TxId = 0;
+    ui64 LockTxId = 0;
+    ui64 LockNodeId = 0;
+    bool InconsistentTx = false;
+    IKqpBufferWriterCallbacks* Callbacks = nullptr;
 };
 
 std::pair<IKqpBufferWriter*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings);

@@ -619,6 +619,12 @@ public:
         const auto serializationResult = ShardedWriteController->SerializeMessageToPayload(shardId, *evWrite);
         YQL_ENSURE(serializationResult.TotalDataSize > 0);
 
+        Cerr << "Send EvWrite to ShardID=" << shardId << ", TxId=" << TxId
+            << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
+            << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
+            << ", Operations=" << metadata->OperationsCount << ", IsFinal=" << metadata->IsFinal
+            << ", Attempts=" << metadata->SendAttempts << Endl;
+
         CA_LOG_D("Send EvWrite to ShardID=" << shardId << ", TxId=" << TxId
             << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
             << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
@@ -1015,6 +1021,29 @@ private:
         Process();
     }
 
+    THashMap<ui64, NKikimrDataEvents::TLock> GetLocks(TWriteToken token) const override {
+        auto& info = WriteInfos.at(token.TableId);
+        THashMap<ui64, NKikimrDataEvents::TLock> result;
+        for (const auto& [shardId, lockInfo] : info.WriteTableActor->GetLocks()) {
+            if (const auto lock = lockInfo.GetLock(); lock) {
+                result.emplace(shardId, *lock);
+            }
+        }
+        return result;
+    }
+
+    THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const override {
+        THashMap<ui64, NKikimrDataEvents::TLock> result;
+        for (const auto& [_, info] : WriteInfos) {
+            for (const auto& [shardId, lockInfo] : info.WriteTableActor->GetLocks()) {
+                if (const auto lock = lockInfo.GetLock(); lock) {
+                    result.emplace(shardId, *lock);
+                }
+            }
+        }
+        return result;
+    }
+
     void Flush(std::function<void()> callback) override {
         Close();
         State = EState::FLUSHING;
@@ -1080,18 +1109,6 @@ private:
             }
         }
         return shardIds;
-    }
-
-    THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const override {
-        THashMap<ui64, NKikimrDataEvents::TLock> result;
-        for (const auto& [_, info] : WriteInfos) {
-            for (const auto& [shardId, lockInfo] : info.WriteTableActor->GetLocks()) {
-                if (const auto lock = lockInfo.GetLock(); lock) {
-                    result.emplace(shardId, *lock);
-                }
-            }
-        }
-        return result;
     }
 
     void PassAway() override {
@@ -1228,6 +1245,7 @@ public:
             Settings.GetTable().GetTableId(),
             Settings.GetTable().GetVersion())
     {
+        Cerr << "FWD::" << TxId << " " << Settings.GetLockTxId() << " " << Settings.GetLockNodeId() << Endl;
         YQL_ENSURE(BufferWriter != nullptr);
         EgressStats.Level = args.StatsLevel;
     }
@@ -1279,7 +1297,12 @@ private:
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
+        /*NKikimrKqp::TEvKqpOutputActorResultInfo resultInfo;
+        for (const auto& [_, lock] : BufferWriter->GetLocks(WriteToken)) {
+            resultInfo.AddLocks()->CopyFrom(lock);
+        }*/
         google::protobuf::Any result;
+        //result.PackFrom(resultInfo);
         return result;
     }
 
@@ -1346,6 +1369,7 @@ void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(
         TString(NYql::KqpTableSinkName),
         [counters] (NKikimrKqp::TKqpTableSinkSettings&& settings, NYql::NDq::TDqAsyncIoFactory::TSinkArguments&& args) {
+            Cerr << "RegisterKqpWriteActor::" << std::get<ui64>(args.TxId) << " " << settings.GetLockTxId() << " " << settings.GetLockNodeId() << Endl;
             if (settings.GetBufferPtr() == 0) {
                 auto* actor = new TKqpDirectWriteActor(std::move(settings), std::move(args), counters);
                 return std::make_pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*>(actor, actor);

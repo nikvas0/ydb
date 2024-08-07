@@ -266,6 +266,12 @@ public:
         FillResponseStats(Ydb::StatusIds::SUCCESS);
         Counters->TxProxyMon->ReportStatusOK->Inc();
 
+        if (BufferWriter) {
+            for (const auto& [_, lock] : BufferWriter->GetLocks()) {
+                Locks.push_back(lock);
+            }
+        }
+
         auto addLocks = [this](const auto& data) {
             if (data.GetData().template Is<NKikimrTxDataShard::TEvKqpInputActorResultInfo>()) {
                 NKikimrTxDataShard::TEvKqpInputActorResultInfo info;
@@ -1870,9 +1876,17 @@ private:
             TKqpDataExecuter* Executer;
         };
         BufferWriterCallbacks = std::make_unique<TBufferWriterCallbacks>(this);
-        auto [writer, actor] = CreateKqpBufferWriterActor(TKqpBufferWriterSettings{
-            .Callbacks = BufferWriterCallbacks.get(),
-        });
+        TKqpBufferWriterSettings settings;
+        settings.TxId = TxId;
+        settings.InconsistentTx = false;
+        auto& lockTxId = TasksGraph.GetMeta().LockTxId;
+        if (lockTxId) {
+            settings.LockTxId = *lockTxId;
+            settings.LockNodeId = SelfId().NodeId();
+        }
+        Cerr << "Settings:: " << settings.TxId << " " <<settings.LockTxId << " " << settings.LockNodeId << Endl;
+        settings.Callbacks = BufferWriterCallbacks.get();
+        auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
         BufferWriter = writer;
         RegisterWithSameMailbox(actor);
     }
