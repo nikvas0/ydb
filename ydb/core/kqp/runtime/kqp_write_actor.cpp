@@ -81,8 +81,8 @@ namespace {
             Locks[shardId].AddAndCheckLock(lock);
         }
 
-        const std::optional<NKikimrDataEvents::TLock>& GetLock(ui64 shardId) const {
-            return Locks.at(shardId).GetLock();
+        const std::optional<NKikimrDataEvents::TLock>& GetLock(ui64 shardId) {
+            return Locks[shardId].GetLock();
         }
 
         const THashMap<ui64, TLockInfo>& GetLocks() const {
@@ -120,7 +120,11 @@ struct IKqpTableWriterCallbacks {
 
     virtual void OnPrepared() = 0;
 
-    virtual void OnMessageAcknowledged(ui64 dataSize) = 0;
+    virtual void OnPrepared(IKqpBufferWriter::TPreparedInfo&& preparedInfo) = 0;
+
+    //virtual void OnCommitted(ui64 shardId) = 0;
+
+    virtual void OnMessageAcknowledged(ui64 shardId, ui64 dataSize, bool isShardEmpty) = 0;
 
     virtual void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) = 0;
 };
@@ -150,11 +154,13 @@ class TKqpTableWriteActor : public TActorBootstrapped<TKqpTableWriteActor> {
         };
     };
 
-    //enum class EState {
-    //    WRITING,
-    //    FLUSHING,
-    //    FINISHING /* = COMMITTING || ROLLINGBACK || PREPARING */,
-    //};
+    enum class EMode {
+        UNSPECIFIED,
+        FLUSH,
+        PREPARE,
+        COMMIT,
+        IMMEDIATE_COMMIT,
+    };
 
 public:
     TKqpTableWriteActor(
@@ -449,7 +455,16 @@ public:
             return;
         }
         case NKikimrDataEvents::TEvWriteResult::STATUS_PREPARED: {
-            YQL_ENSURE(false);
+            const auto& result = ev->Get()->Record;
+            IKqpBufferWriter::TPreparedInfo preparedInfo;
+            Cerr << "PREPARED:: " << result.GetMinStep() << " - " << result.GetMaxStep() << Endl;
+            preparedInfo.ShardId = result.GetOrigin();
+            preparedInfo.MinStep = result.GetMinStep();
+            preparedInfo.MaxStep = result.GetMaxStep();
+            preparedInfo.Coordinators = TVector<ui64>(result.GetDomainCoordinators().begin(),
+                                                                  result.GetDomainCoordinators().end());
+            Callbacks->OnPrepared(std::move(preparedInfo));
+            return;
         }
         case NKikimrDataEvents::TEvWriteResult::STATUS_COMPLETED: {
             ProcessWriteCompletedShard(ev);
@@ -568,17 +583,53 @@ public:
             LocksManager.AddLock(ev->Get()->Record.GetOrigin(), lock);
         }
 
-        const auto removedDataSize = ShardedWriteController->OnMessageAcknowledged(
-            ev->Get()->Record.GetOrigin(), ev->Cookie);
-        if (removedDataSize) {
-            Callbacks->OnMessageAcknowledged(*removedDataSize);
+        if (Mode == EMode::COMMIT) {
+            Callbacks->OnMessageAcknowledged(ev->Get()->Record.GetOrigin(), 0, true);
+        } else {
+            const auto result = ShardedWriteController->OnMessageAcknowledged(
+                ev->Get()->Record.GetOrigin(), ev->Cookie);
+            if (result) {
+                Callbacks->OnMessageAcknowledged(ev->Get()->Record.GetOrigin(), result->DataSize, result->IsShardEmpty);
+            }
         }
     }
 
-    void FlushPendingShards() {
+    void SetPrepare() {
+        Mode = EMode::PREPARE;
+        for (const auto shardId : ShardedWriteController->GetShardsIds()) {
+            const auto metadata = ShardedWriteController->GetMessageMetadata(shardId);
+            if (!metadata || (metadata->IsLast && metadata->SendAttempts != 0)) {
+                SendEmptyFinalToShard(shardId);
+            }
+        }
+    }
+
+    void SetCommit() {
+        Mode = EMode::COMMIT;
+    }
+
+    void SetImmediateCommit() {
+        Mode = EMode::IMMEDIATE_COMMIT;
+        // TODO: send data for empty
+    }
+
+    void Flush() {
+        //Mode = EMode::FLUSH;
         for (const size_t shardId : ShardedWriteController->GetPendingShards()) {
             SendDataToShard(shardId);
         }
+    }
+
+    void SendEmptyFinalToShard(const ui64 shardId) {
+        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(
+            NKikimrDataEvents::TEvWrite::MODE_PREPARE);
+        evWrite->SetTxId(TxId);
+        evWrite->Record.MutableLocks()->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
+        Send(
+            PipeCacheId,
+            new TEvPipeCache::TEvForward(evWrite.release(), shardId, true),
+            0,
+            0);
     }
 
     void SendDataToShard(const ui64 shardId) {
@@ -598,18 +649,37 @@ public:
             return;
         }
 
-        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(
-            NKikimrDataEvents::TEvWrite::MODE_IMMEDIATE);
+        const bool isPrepare = metadata->IsFinal && Mode == EMode::PREPARE;
+        const bool isImmediateCommit = metadata->IsFinal && Mode == EMode::IMMEDIATE_COMMIT;
+
+        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>();
+
+        evWrite->Record.SetTxMode(isPrepare
+            ? NKikimrDataEvents::TEvWrite::MODE_PREPARE
+            : NKikimrDataEvents::TEvWrite::MODE_IMMEDIATE);
         
-        if (false && Closed && metadata->IsFinal) {
-            // Last immediate write (only for datashard)
+        if (Closed && isImmediateCommit) {
+            evWrite->Record.SetTxId(TxId);
             const auto lock = LocksManager.GetLock(shardId);
-            if (lock) {
                 // multi immediate evwrite
-                auto* locks = evWrite->Record.MutableLocks();
-                locks->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
-                locks->AddSendingShards(shardId);
-                locks->AddReceivingShards(shardId);
+            auto* locks = evWrite->Record.MutableLocks();
+            locks->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
+            //locks->AddSendingShards(shardId); // TODO: other shards
+            //locks->AddReceivingShards(shardId);
+            if (lock) {
+                *locks->AddLocks() = *lock;
+            }
+        } else if (Closed && isPrepare) {
+            Cerr << "HERE" << Endl;
+            evWrite->Record.SetTxId(TxId);
+            // NOT TRUE:: // Last immediate write (only for datashard)
+            const auto lock = LocksManager.GetLock(shardId);
+                // multi immediate evwrite
+            auto* locks = evWrite->Record.MutableLocks();
+            locks->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
+            //locks->AddSendingShards(shardId); // TODO: other shards
+            locks->AddReceivingShards(shardId);
+            if (lock) {
                 *locks->AddLocks() = *lock;
             }
         } else if (!InconsistentTx) {
@@ -619,13 +689,13 @@ public:
         const auto serializationResult = ShardedWriteController->SerializeMessageToPayload(shardId, *evWrite);
         YQL_ENSURE(serializationResult.TotalDataSize > 0);
 
-        Cerr << "Send EvWrite to ShardID=" << shardId << ", TxId=" << TxId
-            << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
+        Cerr << "Send EvWrite to ShardID=" << shardId << ", isPrepare=" << isPrepare << ", isImmediateCommit=" << isImmediateCommit << ", TxId=" << evWrite->Record.GetTxId()
+            << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId() << ", Locks=" << evWrite->Record.GetLocks().ShortDebugString()
             << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
             << ", Operations=" << metadata->OperationsCount << ", IsFinal=" << metadata->IsFinal
             << ", Attempts=" << metadata->SendAttempts << Endl;
 
-        CA_LOG_D("Send EvWrite to ShardID=" << shardId << ", TxId=" << TxId
+        CA_LOG_D("Send EvWrite to ShardID=" << shardId << ", isPrepare=" << isPrepare << ", isImmediateCommit=" << isImmediateCommit << ", TxId=" << evWrite->Record.GetTxId()
             << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
             << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
             << ", Operations=" << metadata->OperationsCount << ", IsFinal=" << metadata->IsFinal
@@ -746,6 +816,7 @@ public:
 
     TLocksManager LocksManager;
     bool Closed = false;
+    EMode Mode = EMode::UNSPECIFIED;
 
     IShardedWriteControllerPtr ShardedWriteController = nullptr;
 };
@@ -864,7 +935,7 @@ private:
         }
 
         if (Closed || GetFreeSpace() <= 0) {
-            WriteTableActor->FlushPendingShards();
+            WriteTableActor->Flush();
         }
 
         if (Closed && WriteTableActor->IsFinished()) {
@@ -900,7 +971,11 @@ private:
         Process();
     }
 
-    void OnMessageAcknowledged(ui64 dataSize) override {
+    void OnPrepared(IKqpBufferWriter::TPreparedInfo&&) override {
+    }
+
+    void OnMessageAcknowledged(ui64 shardId, ui64 dataSize, bool isShardEmpty) override {
+        Y_UNUSED(shardId, isShardEmpty);
         EgressStats.Bytes += dataSize;
         EgressStats.Chunks++;
         EgressStats.Splits++;
@@ -981,6 +1056,10 @@ private:
         }
     }
 
+    void SetOnRuntimeError(IKqpBufferWriterCallbacks* callbacks) override {
+        Callbacks = callbacks;
+    }
+
     TWriteToken Open(TWriteSettings&& settings) override {
         YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
 
@@ -1045,25 +1124,46 @@ private:
     }
 
     void Flush(std::function<void()> callback) override {
-        Close();
         State = EState::FLUSHING;
         OnFlushedCallback = std::move(callback);
+        Close();
         Process();
     }
 
     void Prepare(std::function<void(TPreparedInfo&& preparedInfo)> callback, TPrepareSettings&& prepareSettings) override {
+        Cerr << "PREPARE "  << static_cast<ui64>(State) << Endl;
         YQL_ENSURE(State == EState::WRITING);
         Y_UNUSED(callback, prepareSettings);
+        State = EState::PREPARING;
+        OnPreparedCallback = std::move(callback);
+        for (auto& [_, info] : WriteInfos) {
+            info.WriteTableActor->SetPrepare();
+        }
         Close();
+        Process();
     }
 
-    void ImmediateCommit(std::function<void()> callback) override {
+    void OnCommit(std::function<void(ui64)> callback) override {
+        YQL_ENSURE(State == EState::PREPARING);
+        State = EState::COMMITTING;
+        OnCommitCallback = std::move(callback);
+        for (auto& [_, info] : WriteInfos) {
+            info.WriteTableActor->SetCommit();
+        }
+    }
+
+    void ImmediateCommit(std::function<void(ui64)> callback) override {
         YQL_ENSURE(State == EState::WRITING);
-        Y_UNUSED(callback);
+        State = EState::COMMITTING;
+        OnCommitCallback = std::move(callback);
+        for (auto& [_, info] : WriteInfos) {
+            info.WriteTableActor->SetImmediateCommit();
+        }
         Close();
+        Process();
     }
 
-    void Rollback(std::function<void()> callback) override {
+    void Rollback(std::function<void(ui64)> callback) override {
         YQL_ENSURE(State == EState::WRITING);
         Y_UNUSED(callback);
     }
@@ -1137,15 +1237,16 @@ private:
             ResumeExecution();
         }
 
-        const bool closed = (State == EState::WAITING
+        const bool needToFlush = (State == EState::WAITING
             || State == EState::FLUSHING
             || State == EState::PREPARING
-            || State == EState::COMMITTING);
+            || State == EState::COMMITTING
+            || State == EState::ROLLINGBACK);
 
-        if (closed) {
+        if (needToFlush) {
             for (auto& [_, info] : WriteInfos) {
                 if (info.WriteTableActor->IsReady()) {
-                    info.WriteTableActor->FlushPendingShards();
+                    info.WriteTableActor->Flush();
                 }
             }
         }
@@ -1194,12 +1295,22 @@ private:
         Process();
     }
 
-    void OnMessageAcknowledged(ui64) override {
+    void OnPrepared(IKqpBufferWriter::TPreparedInfo&& preparedInfo) override {
+        OnPreparedCallback(std::move(preparedInfo));
         Process();
     }
 
+    void OnMessageAcknowledged(ui64 shardId, ui64 dataSize, bool isShardEmpty) override {
+        Y_UNUSED(dataSize);
+        if (State == EState::COMMITTING && isShardEmpty) {
+            OnCommitCallback(shardId);
+        } else {
+            Process();
+        }
+    }
+
     void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) override {
-        Settings.Callbacks->OnRuntimeError(message, statusCode, subIssues);
+        Callbacks->OnRuntimeError(message, statusCode, subIssues);
     }
 
 private:
@@ -1221,6 +1332,9 @@ private:
 
     EState State;
     std::function<void()> OnFlushedCallback;
+    std::function<void(TPreparedInfo&& preparedInfo)> OnPreparedCallback;
+    std::function<void(ui64)> OnCommitCallback;
+    IKqpBufferWriterCallbacks* Callbacks = nullptr;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };

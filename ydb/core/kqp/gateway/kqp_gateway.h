@@ -74,7 +74,7 @@ void ApplyServiceConfig(NYql::TKikimrConfiguration& kqpConfig, const NKikimrConf
 enum class ELocksOp {
     Unspecified = 0,
     Commit,
-    Rollback
+    Rollback,
 };
 
 class IKqpGateway : public NYql::IKikimrGateway {
@@ -160,6 +160,7 @@ public:
         TMaybe<NKikimrKqp::TRlPath> RlPath;
         bool NeedTxId = true;
         bool UseImmediateEffects = false;
+        bool NeedToFlush = false;
 
         NLWTrace::TOrbit Orbit;
         NWilson::TTraceId TraceId;

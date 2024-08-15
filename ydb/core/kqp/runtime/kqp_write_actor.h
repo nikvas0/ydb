@@ -40,6 +40,8 @@ public:
         std::function<void()> ResumeExecutionCallback; // TODO: get rid of std::fuction
     };
 
+    virtual void SetOnRuntimeError(IKqpBufferWriterCallbacks* callbacks) = 0;
+
     virtual TWriteToken Open(TWriteSettings&& settings) = 0;
     virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
     virtual void Close(TWriteToken token) = 0;
@@ -65,9 +67,10 @@ public:
         TVector<ui64> Coordinators;
     };
 
-    virtual void Prepare(std::function<void(TPreparedInfo&& preparedInfo)> callback, TPrepareSettings&& prepareSettings) = 0;
-    virtual void ImmediateCommit(std::function<void()> callback) = 0;
-    virtual void Rollback(std::function<void()> callback) = 0;
+    virtual void Prepare(std::function<void(TPreparedInfo&&)> callback, TPrepareSettings&& prepareSettings) = 0;
+    virtual void OnCommit(std::function<void(ui64)> callback) = 0;
+    virtual void ImmediateCommit(std::function<void(ui64)> callback) = 0;
+    virtual void Rollback(std::function<void(ui64)> callback) = 0;
 
     virtual THashSet<ui64> GetShardsIds() const = 0;
     virtual THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const = 0;
@@ -82,7 +85,7 @@ struct TKqpBufferWriterSettings {
     ui64 LockTxId = 0;
     ui64 LockNodeId = 0;
     bool InconsistentTx = false;
-    IKqpBufferWriterCallbacks* Callbacks = nullptr;
+    //IKqpBufferWriterCallbacks* Callbacks = nullptr;
 };
 
 std::pair<IKqpBufferWriter*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings);

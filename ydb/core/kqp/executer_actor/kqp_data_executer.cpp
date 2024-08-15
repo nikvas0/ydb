@@ -114,6 +114,8 @@ class TKqpDataExecuter : public TKqpExecuterBase<TKqpDataExecuter, EExecType::Da
         TReattachState ReattachState;
         ui32 RestartCount = 0;
         bool Restarting = false;
+
+        ui32 Flags = 0;
     };
 
 public:
@@ -244,7 +246,7 @@ public:
     }
 
     void Finalize() {
-        if (BufferWriter) {
+        if (BufferWriter && Request.LocksOp == ELocksOp::Unspecified && Request.NeedToFlush) {
             BufferWriter->Flush([this]() {
                 Finalize2();
             });
@@ -269,6 +271,13 @@ public:
         if (BufferWriter) {
             for (const auto& [_, lock] : BufferWriter->GetLocks()) {
                 Locks.push_back(lock);
+            }
+
+            if (Request.LocksOp == ELocksOp::Unspecified && !Request.NeedToFlush) {
+                ResponseEv->BufferWriter = BufferWriter;
+            } else {
+                // commit or rollback
+                ResponseEv->BufferWriter = nullptr;
             }
         }
 
@@ -959,6 +968,7 @@ private:
         for (const auto& [_, state] : ShardStates) {
             if (state.State != TShardState::EState::Prepared) {
                 LOG_D("Not all shards are prepared, waiting...");
+                Cerr << "STILL WAITING" << Endl;
                 return;
             }
         }
@@ -967,6 +977,14 @@ private:
 
         LOG_D("All shards prepared, become ExecuteState.");
         Become(&TKqpDataExecuter::ExecuteState);
+        if (BufferWriter) {
+            BufferWriter->OnCommit([this](ui64 shardId) {
+                TShardState* shardState = ShardStates.FindPtr(shardId);
+                YQL_ENSURE(shardState);
+                shardState->State = TShardState::EState::Finished;
+                CheckExecutionComplete();
+            });
+        }
         ExecutePlanned();
     }
 
@@ -1014,6 +1032,10 @@ private:
                 }
             }
 
+            affectedFlags |= TEvTxProxy::TEvProposeTransaction::AffectedWrite | TEvTxProxy::TEvProposeTransaction::AffectedRead; //state.Flags;
+
+            Cerr << ">> " << affectedFlags << " " << "SHARD" << " " << shardId << Endl;
+
             item.SetFlags(affectedFlags);
         }
 
@@ -1032,9 +1054,11 @@ private:
             return;
         }
 
-        transaction.SetTxId(TxId);
+        transaction.SetTxId(TxId - 1);
         transaction.SetMinStep(aggrMinStep);
         transaction.SetMaxStep(aggrMaxStep);
+
+        Cerr << "COORD: : " << transaction.GetTxId() << " " << transaction.GetMinStep() << " " << transaction.GetMaxStep() << " " << transaction.GetAffectedSet().size() << Endl;
 
         if (VolatileTx) {
             transaction.SetFlags(TEvTxProxy::TEvProposeTransaction::FlagVolatile);
@@ -1732,7 +1756,8 @@ private:
         evWriteTransaction->Record.SetTxMode(NKikimrDataEvents::TEvWrite::MODE_PREPARE);
         evWriteTransaction->Record.SetTxId(TxId);
 
-        evWriteTransaction->Record.MutableLocks()->SetOp(NKikimrDataEvents::TKqpLocks::Commit);
+        //YQL_ENSURE(Request.LocksOp == ELocksOp::Commit);
+        //evWriteTransaction->Record.MutableLocks()->SetOp(NKikimrDataEvents::TKqpLocks::Commit); // TODO: Rollback???
 
         auto locksCount = evWriteTransaction->Record.GetLocks().LocksSize();
         shardState.DatashardState->ShardReadLocks = locksCount > 0;
@@ -1750,6 +1775,116 @@ private:
 
         auto result = ShardStates.emplace(shardId, std::move(shardState));
         YQL_ENSURE(result.second);
+    }
+
+    void ExecuteBufferWriterTransactions() {
+        if (Request.LocksOp != ELocksOp::Commit) return; // TODO: rollback
+
+        const auto shardIds = BufferWriter->GetShardsIds();
+        const auto locks = BufferWriter->GetLocks();
+
+        for (const ui64 shardId : shardIds) {
+            TShardState shardState;
+            shardState.State = ImmediateTx
+                ? TShardState::EState::Executing
+                : TShardState::EState::Preparing;
+            shardState.DatashardState.ConstructInPlace();
+            if (auto it = locks.find(shardId); it != locks.end()) {
+                shardState.DatashardState->ShardReadLocks = true;
+            } else {
+                shardState.DatashardState->ShardReadLocks = false;
+            }
+
+            const auto [_, inserted] = ShardStates.emplace(shardId, std::move(shardState));
+            YQL_ENSURE(inserted);
+        }
+
+
+        Cerr << "ExecuteBufferWriterTransactions:: PREPARE" << Endl;
+
+        if (!ImmediateTx) {
+            BufferWriter->Prepare([this](IKqpBufferWriter::TPreparedInfo&& preparedInfo) {
+                TShardState* shardState = ShardStates.FindPtr(preparedInfo.ShardId);
+                YQL_ENSURE(shardState, "Unexpected propose result from unknown tabletId " << preparedInfo.ShardId);
+
+                shardState->Flags |= TEvTxProxy::TEvProposeTransaction::AffectedRead;
+                shardState->Flags |= TEvTxProxy::TEvProposeTransaction::AffectedWrite;
+
+                //NYql::TIssues issues;
+                //NYql::IssuesFromMessage(res->Record.GetIssues(), issues);
+                //LOG_D("Got evWrite result, shard: " << preparedInfo.ShardId << ", status: "
+                //    << NKikimrDataEvents::TEvWriteResult::EStatus_Name(res->Record.GetStatus())
+                //    << ", error: " << issues.ToString());
+
+                //if (Stats) {
+                //    Stats->AddDatashardPrepareStats(std::move(*res->Record.MutableTxStats()));
+                //}
+
+                //switch (ev->Get()->GetStatus()) {
+                //    case NKikimrDataEvents::TEvWriteResult::STATUS_UNSPECIFIED: {
+                //        YQL_ENSURE(false);
+                //    }
+                //    case NKikimrDataEvents::TEvWriteResult::STATUS_PREPARED: {
+                //        if (!ShardPrepared(*shardState, res->Record)) {
+                //            return;
+                //        }
+                //        return CheckPrepareCompleted();
+                //    }
+                //    case NKikimrDataEvents::TEvWriteResult::STATUS_COMPLETED: {
+                //        YQL_ENSURE(false);
+                //    }
+                //    default:
+                //    {
+                //        return ShardError(res->Record);
+                //    }
+                //}
+
+                YQL_ENSURE(shardState->State == TShardState::EState::Preparing);
+                shardState->State = TShardState::EState::Prepared;
+
+                shardState->DatashardState->ShardMinStep = preparedInfo.MinStep;
+                shardState->DatashardState->ShardMaxStep = preparedInfo.MaxStep;
+
+                Cerr << "PREPARE RESULT :: " << preparedInfo.MinStep << " " << preparedInfo.MaxStep << Endl;
+
+                ui64 coordinator = 0;
+                if (!preparedInfo.Coordinators.empty()) {
+                    auto domainCoordinators = TCoordinators(preparedInfo.Coordinators);
+                    coordinator = domainCoordinators.Select(TxId);
+                }
+
+                if (coordinator && !TxCoordinator) {
+                    TxCoordinator = coordinator;
+                }
+
+                YQL_ENSURE(!(!TxCoordinator || TxCoordinator != coordinator));
+
+                /*if (!TxCoordinator || TxCoordinator != coordinator) {
+                    LOG_E("Handle TEvProposeTransactionResult: unable to select coordinator. Tx canceled, actorId: " << SelfId()
+                        << ", previously selected coordinator: " << TxCoordinator
+                        << ", coordinator selected at propose result: " << coordinator);
+
+                    Counters->TxProxyMon->TxResultAborted->Inc();
+                    ReplyErrorAndDie(Ydb::StatusIds::CANCELLED, MakeIssue(
+                        NKikimrIssues::TIssuesIds::TX_DECLINED_IMPLICIT_COORDINATOR, "Unable to choose coordinator."));
+                    return false;
+                }*/
+
+                CheckPrepareCompleted();
+            }, std::move(BufferWriterPrepareSettings));
+        } else {
+            BufferWriter->ImmediateCommit([this](ui64 shardId) {
+                TShardState* shardState = ShardStates.FindPtr(shardId);
+
+                YQL_ENSURE(shardState->State == TShardState::EState::Executing);
+                shardState->State = TShardState::EState::Finished;
+
+                //Counters->TxProxyMon->ResultsReceivedCount->Inc();
+                //Counters->TxProxyMon->TxResultComplete->Inc();
+
+                CheckExecutionComplete();
+            });
+        }
     }
 
     bool WaitRequired() const {
@@ -1876,19 +2011,25 @@ private:
             TKqpDataExecuter* Executer;
         };
         BufferWriterCallbacks = std::make_unique<TBufferWriterCallbacks>(this);
-        TKqpBufferWriterSettings settings;
-        settings.TxId = TxId;
-        settings.InconsistentTx = false;
-        auto& lockTxId = TasksGraph.GetMeta().LockTxId;
-        if (lockTxId) {
-            settings.LockTxId = *lockTxId;
-            settings.LockNodeId = SelfId().NodeId();
+        
+        if (!BufferWriter) {
+            TKqpBufferWriterSettings settings;
+            settings.TxId = TxId;
+            settings.InconsistentTx = false;
+            auto& lockTxId = TasksGraph.GetMeta().LockTxId;
+            if (lockTxId) {
+                settings.LockTxId = *lockTxId;
+                settings.LockNodeId = SelfId().NodeId();
+            }
+            Cerr << "Settings:: " << settings.TxId << " " <<settings.LockTxId << " " << settings.LockNodeId << Endl;
+            //settings.Callbacks = BufferWriterCallbacks.get();
+            auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
+            BufferWriter = writer;
+            BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
+            RegisterWithSameMailbox(actor);
+        } else {
+            BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
         }
-        Cerr << "Settings:: " << settings.TxId << " " <<settings.LockTxId << " " << settings.LockNodeId << Endl;
-        settings.Callbacks = BufferWriterCallbacks.get();
-        auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
-        BufferWriter = writer;
-        RegisterWithSameMailbox(actor);
     }
 
     void Execute() {
@@ -2051,7 +2192,7 @@ private:
         YQL_ENSURE(evWriteTxs.empty() || datashardTxs.empty());
 
         // Single-shard datashard transactions are always immediate
-        ImmediateTx = (datashardTxs.size() + evWriteTxs.size() + Request.TopicOperations.GetSize() + sourceScanPartitionsCount) <= 1
+        ImmediateTx = (datashardTxs.size() + evWriteTxs.size() + (BufferWriter ? BufferWriter->GetShardsIds().size() : 0) + Request.TopicOperations.GetSize() + sourceScanPartitionsCount) <= 1
                     && !UnknownAffectedShardCount
                     && evWriteTxs.empty()
                     && !HasOlapTable;
@@ -2274,10 +2415,27 @@ private:
             YQL_ENSURE(Request.LocksOp == ELocksOp::Commit || Request.LocksOp == ELocksOp::Rollback);
         }
 
+        THashSet<ui64> bufferWriterShards;
+        if (BufferWriter) {
+            bufferWriterShards = BufferWriter->GetShardsIds();
+        }
+
         // Materialize (possibly empty) txs for all shards with locks (either commit or rollback)
         for (auto& [shardId, locksList] : locksMap) {
             YQL_ENSURE(!locksList.empty(), "unexpected empty locks list in DataShardLocks");
             NKikimrDataEvents::TKqpLocks* locks = nullptr;
+
+            const bool isShardAtBufferWriter = bufferWriterShards.contains(shardId);
+            if (isShardAtBufferWriter) {
+                // These locks will be committed by buffer writer.
+
+                // TODO: add locks from locksList (read locks)
+                if (Request.LocksOp == ELocksOp::Commit) {
+                    ShardsWithEffects.insert(shardId);
+                    YQL_ENSURE(!ReadOnlyTx);
+                }
+                continue;
+            }
 
             if (UseEvWrite) {
                 if (auto it = evWriteTxs.find(shardId); it != evWriteTxs.end()) {
@@ -2331,7 +2489,7 @@ private:
 
         const bool needRollback = Request.LocksOp == ELocksOp::Rollback;
 
-        VolatileTx = (
+        VolatileTx = false && (
             // We want to use volatile transactions only when the feature is enabled
             AppData()->FeatureFlags.GetEnableDataShardVolatileTransactions() &&
             // We don't want volatile tx when acquiring locks (including write locks for uncommitted writes)
@@ -2360,7 +2518,8 @@ private:
             !topicTxs.empty());
 
         if (!locksMap.empty() || VolatileTx ||
-            Request.TopicOperations.HasReadOperations() || Request.TopicOperations.HasWriteOperations())
+            Request.TopicOperations.HasReadOperations() ||
+            Request.TopicOperations.HasWriteOperations())
         {
             YQL_ENSURE(Request.LocksOp == ELocksOp::Commit || Request.LocksOp == ELocksOp::Rollback || VolatileTx);
 
@@ -2399,6 +2558,12 @@ private:
                         }
                         // Effects are only applied when all locks are valid
                         receivingShardsSet.insert(shardId);
+                    }
+                }
+
+                if (BufferWriter) {
+                    for (const ui64& shardId : BufferWriter->GetShardsIds()) {
+                        sendingShardsSet.insert(shardId);
                     }
                 }
 
@@ -2487,6 +2652,14 @@ private:
                     *tx.MutableSendingShards() = sendingShards;
                     *tx.MutableReceivingShards() = receivingShards;
                     YQL_ENSURE(!arbiter);
+                }
+
+                if (BufferWriter) {
+                    BufferWriterPrepareSettings.SendingShards = THashSet<ui64>(sendingShardsSet.begin(), sendingShardsSet.end());
+                    BufferWriterPrepareSettings.ReceivingShards = THashSet<ui64>(receivingShardsSet.begin(), receivingShardsSet.end());
+                    if (arbiter) {
+                        BufferWriterPrepareSettings.ArbiterShard = arbiter;
+                    }
                 }
             }
         }
@@ -2618,10 +2791,14 @@ private:
 
         ExecuteTopicTabletTransactions(TopicTxs);
 
+        Cerr << "ExecuteBufferWriterTransactions" << Endl;
+        ExecuteBufferWriterTransactions();
+
         LOG_I("Total tasks: " << TasksGraph.GetTasks().size()
             << ", readonly: " << ReadOnlyTx
             << ", datashardTxs: " << DatashardTxs.size()
             << ", evWriteTxs: " << EvWriteTxs.size()
+            << ", bufferEvWriteTxs: " << (BufferWriter ? BufferWriter->GetShardsIds().size() : 0)
             << ", topicTxs: " << Request.TopicOperations.GetSize()
             << ", volatile: " << VolatileTx
             << ", immediate: " << ImmediateTx
@@ -2703,7 +2880,9 @@ private:
             Send(MakePipePerNodeCacheID(true), new TEvPipeCache::TEvUnlink(0));
         }
 
-        if (BufferWriter) {
+        if (BufferWriter && (Request.LocksOp != ELocksOp::Unspecified || Request.NeedToFlush)) {
+            // commit or rollback
+            // TODO: think about rollback after failed commit: it can crash
             BufferWriter->Terminate();
         }
 
@@ -2793,6 +2972,7 @@ private:
     TEvWriteTxs EvWriteTxs;
     TTopicTabletTxs TopicTxs;
     std::unique_ptr<IKqpBufferWriterCallbacks> BufferWriterCallbacks = nullptr;
+    IKqpBufferWriter::TPrepareSettings BufferWriterPrepareSettings;
 
     // Lock handle for a newly acquired lock
     TLockHandle LockHandle;

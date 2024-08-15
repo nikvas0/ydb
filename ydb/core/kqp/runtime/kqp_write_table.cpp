@@ -1181,7 +1181,8 @@ public:
         TMessageMetadata meta;
         meta.Cookie = shardInfo.GetCookie();
         meta.OperationsCount = shardInfo.GetBatchesInFlight();
-        meta.IsFinal = shardInfo.IsClosed() && shardInfo.Size() == shardInfo.GetBatchesInFlight();
+        meta.IsLast = shardInfo.Size() == shardInfo.GetBatchesInFlight();
+        meta.IsFinal = shardInfo.IsClosed() && meta.IsLast;
         meta.SendAttempts = shardInfo.GetSendAttempts();
 
         return meta;
@@ -1212,11 +1213,17 @@ public:
         return result;
     }
 
-    std::optional<i64> OnMessageAcknowledged(ui64 shardId, ui64 cookie) override {
+    std::optional<TMessageAcknowledgedResult> OnMessageAcknowledged(ui64 shardId, ui64 cookie) override {
         auto allocGuard = TypeEnv.BindAllocator();
         auto& shardInfo = ShardsInfo.GetShard(shardId);
         const auto removedDataSize = shardInfo.PopBatches(cookie);
-        return removedDataSize;
+        if (removedDataSize) {
+            return TMessageAcknowledgedResult {
+                .DataSize = *removedDataSize,
+                .IsShardEmpty = shardInfo.IsEmpty(),
+            };
+        }
+        return std::nullopt;
     }
 
     void OnMessageSent(ui64 shardId, ui64 cookie) override {

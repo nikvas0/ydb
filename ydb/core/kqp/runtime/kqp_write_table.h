@@ -39,6 +39,7 @@ public:
     struct TMessageMetadata {
         ui64 Cookie = 0;
         ui64 OperationsCount = 0;
+        bool IsLast = false;
         bool IsFinal = false;
         ui64 SendAttempts = 0;
     };
@@ -51,7 +52,12 @@ public:
 
     virtual TSerializationResult SerializeMessageToPayload(ui64 shardId, NKikimr::NEvents::TDataEvents::TEvWrite& evWrite) = 0;
 
-    virtual std::optional<i64> OnMessageAcknowledged(ui64 shardId, ui64 cookie) = 0;
+    struct TMessageAcknowledgedResult {
+        ui64 DataSize = 0;
+        bool IsShardEmpty = 0;
+    };
+
+    virtual std::optional<TMessageAcknowledgedResult> OnMessageAcknowledged(ui64 shardId, ui64 cookie) = 0;
     virtual void OnMessageSent(ui64 shardId, ui64 cookie) = 0;
 
     virtual void ResetRetries(ui64 shardId, ui64 cookie) = 0;

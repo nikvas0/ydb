@@ -272,7 +272,7 @@ private:
 }
 
 IKqpTransactionManagerPtr CreateKqpTransactionManager() {
-    return std::make_unique<TKqpTransactionManager>();
+    return std::make_shared<TKqpTransactionManager>();
 }
 
 }

@@ -24,6 +24,7 @@ struct TEvKqpExecuter {
         NLongTxService::TLockHandle LockHandle;
         TVector<TKqpPhyTxHolder::TConstPtr> TxHolders;
         TVector<TKqpExecuterTxResult> TxResults;
+        IKqpBufferWriter* BufferWriter = nullptr;
 
         NLWTrace::TOrbit Orbit;
         IKqpGateway::TKqpSnapshot Snapshot;

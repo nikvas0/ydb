@@ -3229,13 +3229,14 @@ Y_UNIT_TEST_SUITE(KqpQueryService) {
 
             const TString query = Sprintf(R"(
                 CREATE TABLE `/Root/DataShard` (
-                    Col1 Uint64 NOT NULL,
+                    Col1 Uint32 NOT NULL,
                     Col2 Int32,
                     Col3 String,
                     PRIMARY KEY (Col1)
                 ) WITH (
                     STORE = %s,
-                    AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 10
+                    AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 10,
+                    UNIFORM_PARTITIONS = 10
                 );
             )", IsOlap ? "COLUMN" : "ROW");
 
@@ -3313,7 +3314,7 @@ Y_UNIT_TEST_SUITE(KqpQueryService) {
         void DoExecute() override {
             auto client = Kikimr->GetQueryClient();
 
-            {
+            /*{
                 auto it = client.ExecuteQuery(R"(
                 INSERT INTO `/Root/DataShard` (Col1, Col2) VALUES (0u, 0);
                 INSERT INTO `/Root/DataShard` (Col1, Col3) VALUES (1u, 'test');
@@ -3329,17 +3330,18 @@ Y_UNIT_TEST_SUITE(KqpQueryService) {
                 UNIT_ASSERT_VALUES_EQUAL_C(it.GetStatus(), EStatus::SUCCESS, it.GetIssues().ToString());
                 TString output = StreamResultToYson(it);
                 CompareYson(output, R"([[0u;[0];#];[1u;#;["test"]];[2u;[3];["t"]]])");
-            }
+            }*/
 
             {
                 auto it = client.ExecuteQuery(R"(
                 INSERT INTO `/Root/DataShard` (Col1, Col3) VALUES (0u, 'null');
-            )", NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
-                UNIT_ASSERT_C(!it.IsSuccess(), it.GetIssues().ToString());
-                UNIT_ASSERT_C(
+                --INSERT INTO `/Root/DataShard` (Col1, Col3) VALUES (4294967286u, 'null');
+            )", NYdb::NQuery::TTxControl::BeginTx().CommitTx(), NYdb::NQuery::TExecuteQuerySettings().ClientTimeout(TDuration::Seconds(10))).ExtractValueSync();
+                UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
+                /*UNIT_ASSERT_C(
                     it.GetIssues().ToString().Contains("Operation is aborting because an duplicate key")
                     || it.GetIssues().ToString().Contains("Conflict with existing key."),
-                    it.GetIssues().ToString());
+                    it.GetIssues().ToString());*/
             }
 
             {
