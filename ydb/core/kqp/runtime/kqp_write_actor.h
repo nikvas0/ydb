@@ -23,32 +23,7 @@ class IKqpWriteBuffer {
 public:
     virtual ~IKqpWriteBuffer() = default;
 
-    struct TWriteToken {
-        TTableId TableId;
-        ui64 Cookie;
-
-        bool IsEmpty() const {
-            return !TableId;
-        }
-    };
-
-    struct TWriteSettings {
-        TTableId TableId;
-        TString TablePath; // for error messages
-        NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
-        TVector<NKikimrKqp::TKqpColumnMetadataProto> Columns;
-        std::function<void()> ResumeExecutionCallback; // TODO: get rid of std::fuction
-    };
-
     virtual void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) = 0;
-
-    virtual TWriteToken Open(TWriteSettings&& settings) = 0;
-    virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
-    virtual void Close(TWriteToken token) = 0;
-    virtual THashMap<ui64, NKikimrDataEvents::TLock> GetLocks(TWriteToken token) const = 0;
-
-    virtual i64 GetFreeSpace(TWriteToken token) const = 0;
-    virtual i64 GetTotalFreeSpace() const = 0;
 
     // Only when all writes are closed!
     virtual void Flush(std::function<void()> callback) = 0;

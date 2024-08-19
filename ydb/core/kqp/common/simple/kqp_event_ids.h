@@ -178,5 +178,13 @@ struct TKqpWorkloadServiceEvents {
     };
 };
 
+struct TKqpBufferEvents {
+    enum EKqpBufferEvents {
+        EvBufferWrite = EventSpaceBegin(TKikimrEvents::ES_KQP) + 800,
+        EvBufferWriteResult, 
+    };
+};
+
+
 } // namespace NKqp
 } // namespace NKikimr

@@ -247,7 +247,9 @@ public:
 
     void Finalize() {
         if (BufferWriter && Request.LocksOp == ELocksOp::Unspecified && Request.NeedToFlush) {
+            Cerr << "FIN FLUSH" << Endl;
             BufferWriter->Flush([this]() {
+                // TODO: send message
                 Finalize2();
             });
         } else {
@@ -968,7 +970,6 @@ private:
         for (const auto& [_, state] : ShardStates) {
             if (state.State != TShardState::EState::Prepared) {
                 LOG_D("Not all shards are prepared, waiting...");
-                Cerr << "STILL WAITING" << Endl;
                 return;
             }
         }

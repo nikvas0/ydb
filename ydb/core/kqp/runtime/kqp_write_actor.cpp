@@ -19,12 +19,14 @@
 #include <ydb/library/actors/core/interconnect.h>
 #include <ydb/library/yql/dq/actors/compute/dq_compute_actor_impl.h>
 #include <ydb/library/yql/public/issue/yql_issue_message.h>
+#include <ydb/core/kqp/common/simple/kqp_event_ids.h>
 
 
 namespace {
     constexpr i64 kInFlightMemoryLimitPerActor = 64_MB;
     constexpr i64 kMemoryLimitPerMessage = 64_MB;
     constexpr i64 kMaxBatchesPerMessage = 64;
+    constexpr i64 kMaxForwardedSize = 8_MB;
 
     struct TWriteActorBackoffSettings {
         TDuration StartRetryDelay = TDuration::MilliSeconds(250);
@@ -1009,6 +1011,39 @@ private:
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
 
+
+namespace {
+
+struct TWriteToken {
+    TTableId TableId;
+    ui64 Cookie;
+
+    bool IsEmpty() const {
+        return !TableId;
+    }
+};
+
+struct TWriteSettings {
+    TTableId TableId;
+    TString TablePath; // for error messages
+    NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
+    TVector<NKikimrKqp::TKqpColumnMetadataProto> Columns;
+};
+
+struct TEvBufferWrite : public TEventLocal<TEvBufferWrite, TKqpBufferEvents::EvBufferWrite> {
+    bool Close = false;
+    std::optional<TWriteToken> Token;
+    std::optional<TWriteSettings> Settings;
+    TVector<NMiniKQL::TUnboxedValueBatch> Data;
+};
+
+struct TEvBufferWriteResult : public TEventLocal<TEvBufferWriteResult, TKqpBufferEvents::EvBufferWriteResult> {
+    TWriteToken Token;
+};
+
+}
+
+
 class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, public IKqpWriteBuffer, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpBufferWriteActor>;
 
@@ -1049,10 +1084,10 @@ public:
 
     static constexpr char ActorName[] = "KQP_BUFFER_WRITE_ACTOR";
 
-private:
     STFUNC(StateFunc) {
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvPrivate::TEvTerminate, Handle);
+            hFunc(TEvBufferWrite, Handle);
         }
     }
 
@@ -1060,7 +1095,27 @@ private:
         Callbacks = callbacks;
     }
 
-    TWriteToken Open(TWriteSettings&& settings) override {
+
+    void Handle(TEvBufferWrite::TPtr& ev) {
+        auto result = std::make_unique<TEvBufferWriteResult>();
+        if (!ev->Get()->Token) {
+            AFL_ENSURE(ev->Get()->Settings);
+            result->Token = Open(std::move(*ev->Get()->Settings));
+        } else {
+            result->Token = ev->Token;
+        }
+        if (!ev->Get()->Data.empty()) {
+            for (auto& data : ev->Get()->Data) {
+                Write(result->Token, std::move(data));
+            }
+        }
+        if (ev->Get()->Close) {
+            Close(result->Token);   
+        }
+        Send(ev->Get()->Origin, result.release());
+    }
+
+    TWriteToken Open(TWriteSettings&& settings) {
         YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
 
         auto& info = WriteInfos[settings.TableId];
@@ -1084,7 +1139,7 @@ private:
         return {settings.TableId, std::move(writeToken)};
     }
 
-    void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
+    void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) {
         YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
 
         auto& info = WriteInfos.at(token.TableId);
@@ -1092,7 +1147,7 @@ private:
         Process();
     }
 
-    void Close(TWriteToken token) override {
+    void Close(TWriteToken token) {
         YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
 
         auto& info = WriteInfos.at(token.TableId);
@@ -1100,7 +1155,7 @@ private:
         Process();
     }
 
-    THashMap<ui64, NKikimrDataEvents::TLock> GetLocks(TWriteToken token) const override {
+    THashMap<ui64, NKikimrDataEvents::TLock> GetLocks(TWriteToken token) const {
         auto& info = WriteInfos.at(token.TableId);
         THashMap<ui64, NKikimrDataEvents::TLock> result;
         for (const auto& [shardId, lockInfo] : info.WriteTableActor->GetLocks()) {
@@ -1125,7 +1180,8 @@ private:
 
     void Flush(std::function<void()> callback) override {
         State = EState::FLUSHING;
-        OnFlushedCallback = std::move(callback);
+        Cerr << "SET FLUSH CALLBACK" << Endl;
+        OnFlushedCallback = callback;//std::move(callback);
         Close();
         Process();
     }
@@ -1180,14 +1236,14 @@ private:
         return State == EState::FINISHED;
     }
 
-    i64 GetFreeSpace(TWriteToken token) const override {
+    i64 GetFreeSpace(TWriteToken token) const {
         auto& info = WriteInfos.at(token.TableId);
         return info.WriteTableActor->IsReady()
             ? MemoryLimit - info.WriteTableActor->GetMemory()
             : std::numeric_limits<i64>::min(); // Can't use zero here because compute can use overcommit!
     }
 
-    i64 GetTotalFreeSpace() const override {
+    i64 GetTotalFreeSpace() const {
         return MemoryLimit - GetTotalMemory();
     }
 
@@ -1270,6 +1326,7 @@ private:
                 case EState::FLUSHING:
                     //Settings.Callbacks->OnFlushed();
                     //if (OnFlushedCallback != nullptr) {
+                    YQL_ENSURE(OnFlushedCallback != nullptr);
                     OnFlushedCallback();
                     //}
                     break;
@@ -1352,42 +1409,70 @@ public:
         , OutputIndex(args.OutputIndex)
         , Callbacks(args.Callback)
         , Counters(counters)
-        , BufferWriter(reinterpret_cast<IKqpWriteBuffer*>(Settings.GetBufferPtr()))
+        , BufferWriter(reinterpret_cast<TKqpBufferWriteActor*>(Settings.GetBufferPtr()))
+        , BufferActorId(BufferWriter->SelfId())
         , TxId(std::get<ui64>(args.TxId))
         , TableId(
             Settings.GetTable().GetOwnerId(),
             Settings.GetTable().GetTableId(),
             Settings.GetTable().GetVersion())
     {
-        Cerr << "FWD::" << TxId << " " << Settings.GetLockTxId() << " " << Settings.GetLockNodeId() << Endl;
+        Cerr << "FWD::" << TxId << " " << Settings.GetLockTxId() << " " << Settings.GetLockNodeId() << " " << BufferWriter->SelfId()  << Endl;
         YQL_ENSURE(BufferWriter != nullptr);
         EgressStats.Level = args.StatsLevel;
     }
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
-
-        TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
-        columnsMetadata.reserve(Settings.GetColumns().size());
-        for (const auto & column : Settings.GetColumns()) {
-            columnsMetadata.push_back(column);
-        }
-
-        Cerr << "FWD:: OPEN" << Endl;
-        WriteToken = BufferWriter->Open(IKqpWriteBuffer::TWriteSettings{
-            .TableId = TableId,
-            .TablePath = Settings.GetTable().GetPath(),
-            .OperationType = GetOperation(Settings.GetType()),
-            .Columns = std::move(columnsMetadata),
-            .ResumeExecutionCallback = [this]() {
-                Callbacks->ResumeExecution();
-            },
-        });
     }
 
-    static constexpr char ActorName[] = "KQP_DIRECT_WRITE_ACTOR";
+    static constexpr char ActorName[] = "KQP_FORWARD_WRITE_ACTOR";
 
 private:
+    STFUNC(StateFunc) {
+        switch (ev->GetTypeRewrite()) {
+            hFunc(TEvBufferWriteResult, Handle);
+        }
+    }
+
+    void Handle(TEvBufferWriteResult::TPtr& result) {
+        WriteToken = result->Get()->Token;
+    }
+
+    void WriteToBuffer() {
+        auto ev = std::make_unique<TEvBufferWrite>();
+
+        ev->Data = std::move(Data);
+        ev->Close = Closed;
+
+        if (!WriteToken.IsEmpty()) {
+            ev->Token = WriteToken;
+        } else {
+            TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata;
+            columnsMetadata.reserve(Settings.GetColumns().size());
+            for (const auto & column : Settings.GetColumns()) {
+                columnsMetadata.push_back(column);
+            }
+
+            ev->Settings = TWriteSettings{
+                .TableId = TableId,
+                .TablePath = Settings.GetTable().GetPath(),
+                .OperationType = GetOperation(Settings.GetType()),
+                .Columns = std::move(columnsMetadata),
+            };
+        }
+
+        Send(BufferActorId, ev.release());
+
+        EgressStats.Bytes += DataSize;
+        EgressStats.Chunks++;
+        EgressStats.Splits++;
+        EgressStats.Resume();
+
+        Data.clear();
+        DataSize = 0;
+    }
+
     virtual ~TKqpForwardWriteActor() {
     }
 
@@ -1403,46 +1488,27 @@ private:
     }
 
     i64 GetFreeSpace() const final {
-        auto result = WriteToken.IsEmpty()
-            ? std::numeric_limits<i64>::min()
-            : BufferWriter->GetFreeSpace(WriteToken);
-        Cerr << "FWD::GET_FREE_SPACE" << WriteToken.IsEmpty() << " " << result << Endl;
-        return result;
+        return kMaxForwardedSize - DataSize;
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
-        /*NKikimrKqp::TEvKqpOutputActorResultInfo resultInfo;
-        for (const auto& [_, lock] : BufferWriter->GetLocks(WriteToken)) {
-            resultInfo.AddLocks()->CopyFrom(lock);
-        }*/
-        google::protobuf::Any result;
-        //result.PackFrom(resultInfo);
-        return result;
+        //google::protobuf::Any result;
+        return {};//result;
     }
 
     void SendData(NMiniKQL::TUnboxedValueBatch&& data, i64 size, const TMaybe<NYql::NDqProto::TCheckpoint>&, bool finished) final {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
-        EgressStats.Resume();
 
-        Cerr << "FWD::WRITE" << size << " " << finished << Endl;
+        Data.emplace_back(std::move(data));
+        DataSize += size;
 
-        BufferWriter->Write(WriteToken, std::move(data));
-        EgressStats.Bytes += size;
-        EgressStats.Chunks++;
-        EgressStats.Splits++;
-        EgressStats.Resume();
-
-        Cerr << "FWD::WRITE2" << size << " " << finished << Endl;
-
-        if (finished) {
-            Cerr << "FWD::FINISHED" << Endl;
-            BufferWriter->Close(WriteToken);
+        if (finished || GetFreeSpace() <= 0) {
+            WriteToBuffer();
             Callbacks->OnAsyncOutputFinished(GetOutputIndex());
         }
     }
 
     void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {}) {
-        Cerr << "FWD::RuntimeError" << Endl;
         NYql::TIssue issue(message);
         for (const auto& i : subIssues) {
             issue.AddSubIssue(MakeIntrusive<NYql::TIssue>(i));
@@ -1465,12 +1531,17 @@ private:
     NYql::NDq::IDqComputeActorAsyncOutput::ICallbacks * Callbacks = nullptr;
     TIntrusivePtr<TKqpCounters> Counters;
 
-    IKqpWriteBuffer* BufferWriter = nullptr;
+    TKqpBufferWriteActor* BufferWriter = nullptr;
+    TActorId BufferActorId;
+
+    TVector<NMiniKQL::TUnboxedValueBatch> Data;
+    i64 DataSize = 0;
+    bool Closed = false;
 
     const ui64 TxId;
     const TTableId TableId;
 
-    IKqpWriteBuffer::TWriteToken WriteToken;
+    TWriteToken WriteToken;
 };
 
 std::pair<IKqpWriteBuffer*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings) {
