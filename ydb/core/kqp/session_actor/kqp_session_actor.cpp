@@ -2564,7 +2564,7 @@ private:
 
     TGUCSettings::TPtr GUCSettings;
 
-    IKqpBufferWriter* BufferWriter = nullptr;
+    IKqpWriteBuffer* BufferWriter = nullptr;
 };
 
 } // namespace

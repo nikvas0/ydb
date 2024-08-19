@@ -9,8 +9,8 @@
 namespace NKikimr {
 namespace NKqp {
 
-struct IKqpBufferWriterCallbacks {
-    virtual ~IKqpBufferWriterCallbacks() {}
+struct IKqpWriteBufferCallbacks {
+    virtual ~IKqpWriteBufferCallbacks() {}
 
     virtual void OnRuntimeError(
         const TString& message,
@@ -19,9 +19,9 @@ struct IKqpBufferWriterCallbacks {
 };
 
 // TODO: move somewhere else
-class IKqpBufferWriter {
+class IKqpWriteBuffer {
 public:
-    virtual ~IKqpBufferWriter() = default;
+    virtual ~IKqpWriteBuffer() = default;
 
     struct TWriteToken {
         TTableId TableId;
@@ -40,7 +40,7 @@ public:
         std::function<void()> ResumeExecutionCallback; // TODO: get rid of std::fuction
     };
 
-    virtual void SetOnRuntimeError(IKqpBufferWriterCallbacks* callbacks) = 0;
+    virtual void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) = 0;
 
     virtual TWriteToken Open(TWriteSettings&& settings) = 0;
     virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
@@ -85,10 +85,10 @@ struct TKqpBufferWriterSettings {
     ui64 LockTxId = 0;
     ui64 LockNodeId = 0;
     bool InconsistentTx = false;
-    //IKqpBufferWriterCallbacks* Callbacks = nullptr;
+    //IKqpWriteBufferCallbacks* Callbacks = nullptr;
 };
 
-std::pair<IKqpBufferWriter*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings);
+std::pair<IKqpWriteBuffer*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings);
 
 void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory&, TIntrusivePtr<TKqpCounters>);
 

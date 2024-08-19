@@ -120,7 +120,7 @@ struct IKqpTableWriterCallbacks {
 
     virtual void OnPrepared() = 0;
 
-    virtual void OnPrepared(IKqpBufferWriter::TPreparedInfo&& preparedInfo) = 0;
+    virtual void OnPrepared(IKqpWriteBuffer::TPreparedInfo&& preparedInfo) = 0;
 
     //virtual void OnCommitted(ui64 shardId) = 0;
 
@@ -456,7 +456,7 @@ public:
         }
         case NKikimrDataEvents::TEvWriteResult::STATUS_PREPARED: {
             const auto& result = ev->Get()->Record;
-            IKqpBufferWriter::TPreparedInfo preparedInfo;
+            IKqpWriteBuffer::TPreparedInfo preparedInfo;
             Cerr << "PREPARED:: " << result.GetMinStep() << " - " << result.GetMaxStep() << Endl;
             preparedInfo.ShardId = result.GetOrigin();
             preparedInfo.MinStep = result.GetMinStep();
@@ -971,7 +971,7 @@ private:
         Process();
     }
 
-    void OnPrepared(IKqpBufferWriter::TPreparedInfo&&) override {
+    void OnPrepared(IKqpWriteBuffer::TPreparedInfo&&) override {
     }
 
     void OnMessageAcknowledged(ui64 shardId, ui64 dataSize, bool isShardEmpty) override {
@@ -1009,7 +1009,7 @@ private:
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
 
-class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, public IKqpBufferWriter, public IKqpTableWriterCallbacks {
+class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, public IKqpWriteBuffer, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpBufferWriteActor>;
 
     struct TEvPrivate {
@@ -1056,7 +1056,7 @@ private:
         }
     }
 
-    void SetOnRuntimeError(IKqpBufferWriterCallbacks* callbacks) override {
+    void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) override {
         Callbacks = callbacks;
     }
 
@@ -1295,7 +1295,7 @@ private:
         Process();
     }
 
-    void OnPrepared(IKqpBufferWriter::TPreparedInfo&& preparedInfo) override {
+    void OnPrepared(IKqpWriteBuffer::TPreparedInfo&& preparedInfo) override {
         OnPreparedCallback(std::move(preparedInfo));
         Process();
     }
@@ -1334,7 +1334,7 @@ private:
     std::function<void()> OnFlushedCallback;
     std::function<void(TPreparedInfo&& preparedInfo)> OnPreparedCallback;
     std::function<void(ui64)> OnCommitCallback;
-    IKqpBufferWriterCallbacks* Callbacks = nullptr;
+    IKqpWriteBufferCallbacks* Callbacks = nullptr;
 
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
@@ -1352,7 +1352,7 @@ public:
         , OutputIndex(args.OutputIndex)
         , Callbacks(args.Callback)
         , Counters(counters)
-        , BufferWriter(reinterpret_cast<IKqpBufferWriter*>(Settings.GetBufferPtr()))
+        , BufferWriter(reinterpret_cast<IKqpWriteBuffer*>(Settings.GetBufferPtr()))
         , TxId(std::get<ui64>(args.TxId))
         , TableId(
             Settings.GetTable().GetOwnerId(),
@@ -1374,7 +1374,7 @@ public:
         }
 
         Cerr << "FWD:: OPEN" << Endl;
-        WriteToken = BufferWriter->Open(IKqpBufferWriter::TWriteSettings{
+        WriteToken = BufferWriter->Open(IKqpWriteBuffer::TWriteSettings{
             .TableId = TableId,
             .TablePath = Settings.GetTable().GetPath(),
             .OperationType = GetOperation(Settings.GetType()),
@@ -1465,17 +1465,17 @@ private:
     NYql::NDq::IDqComputeActorAsyncOutput::ICallbacks * Callbacks = nullptr;
     TIntrusivePtr<TKqpCounters> Counters;
 
-    IKqpBufferWriter* BufferWriter = nullptr;
+    IKqpWriteBuffer* BufferWriter = nullptr;
 
     const ui64 TxId;
     const TTableId TableId;
 
-    IKqpBufferWriter::TWriteToken WriteToken;
+    IKqpWriteBuffer::TWriteToken WriteToken;
 };
 
-std::pair<IKqpBufferWriter*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings) {
+std::pair<IKqpWriteBuffer*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings) {
     auto* actor = new TKqpBufferWriteActor(std::move(settings));
-    return std::make_pair<IKqpBufferWriter*, NActors::IActor*>(actor, actor);
+    return std::make_pair<IKqpWriteBuffer*, NActors::IActor*>(actor, actor);
 }
 
 

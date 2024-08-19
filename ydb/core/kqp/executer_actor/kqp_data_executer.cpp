@@ -129,7 +129,7 @@ public:
         const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
         NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory,
         const TActorId& creator, const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-        const bool enableOlapSink, const bool useEvWrite, IKqpBufferWriter* bufferWriter,
+        const bool enableOlapSink, const bool useEvWrite, IKqpWriteBuffer* bufferWriter,
         ui32 statementResultIndex, const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup,
         const TGUCSettings::TPtr& GUCSettings)
         : TBase(std::move(request), database, userToken, counters, tableServiceConfig,
@@ -1803,7 +1803,7 @@ private:
         Cerr << "ExecuteBufferWriterTransactions:: PREPARE" << Endl;
 
         if (!ImmediateTx) {
-            BufferWriter->Prepare([this](IKqpBufferWriter::TPreparedInfo&& preparedInfo) {
+            BufferWriter->Prepare([this](IKqpWriteBuffer::TPreparedInfo&& preparedInfo) {
                 TShardState* shardState = ShardStates.FindPtr(preparedInfo.ShardId);
                 YQL_ENSURE(shardState, "Unexpected propose result from unknown tabletId " << preparedInfo.ShardId);
 
@@ -1991,7 +1991,7 @@ private:
     }
 
     void PrepareBufferWriter() {
-        struct TBufferWriterCallbacks : public IKqpBufferWriterCallbacks {
+        struct TBufferWriterCallbacks : public IKqpWriteBufferCallbacks {
             void OnRuntimeError(
                 const TString& message,
                 NYql::NDqProto::StatusIds::StatusCode statusCode,
@@ -2971,8 +2971,8 @@ private:
     TDatashardTxs DatashardTxs;
     TEvWriteTxs EvWriteTxs;
     TTopicTabletTxs TopicTxs;
-    std::unique_ptr<IKqpBufferWriterCallbacks> BufferWriterCallbacks = nullptr;
-    IKqpBufferWriter::TPrepareSettings BufferWriterPrepareSettings;
+    std::unique_ptr<IKqpWriteBufferCallbacks> BufferWriterCallbacks = nullptr;
+    IKqpWriteBuffer::TPrepareSettings BufferWriterPrepareSettings;
 
     // Lock handle for a newly acquired lock
     TLockHandle LockHandle;
@@ -2985,7 +2985,7 @@ IActor* CreateKqpDataExecuter(IKqpGateway::TExecPhysicalRequest&& request, const
     TKqpRequestCounters::TPtr counters, bool streamResult, const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
     NYql::NDq::IDqAsyncIoFactory::TPtr asyncIoFactory, const TActorId& creator,
     const TIntrusivePtr<TUserRequestContext>& userRequestContext,
-    const bool enableOlapSink, const bool useEvWrite, IKqpBufferWriter* bufferWriter, ui32 statementResultIndex,
+    const bool enableOlapSink, const bool useEvWrite, IKqpWriteBuffer* bufferWriter, ui32 statementResultIndex,
     const std::optional<TKqpFederatedQuerySetup>& federatedQuerySetup, const TGUCSettings::TPtr& GUCSettings)
 {
     return new TKqpDataExecuter(std::move(request), database, userToken, counters, streamResult, tableServiceConfig,
