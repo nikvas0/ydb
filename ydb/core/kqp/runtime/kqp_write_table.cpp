@@ -32,7 +32,7 @@ public:
 
     using IBatchPtr = TIntrusivePtr<IBatch>;
 
-    virtual void AddData(NMiniKQL::TUnboxedValueBatch&& data) = 0;
+    virtual void AddData(const NMiniKQL::TUnboxedValueBatch& data) = 0;
     virtual void AddBatch(const IBatchPtr& batch) = 0;
 
     virtual void Close() = 0;
@@ -398,7 +398,7 @@ public:
         Sharding = shardingConclusion.DetachResult();
     }
 
-    void AddData(NMiniKQL::TUnboxedValueBatch&& data) override {
+    void AddData(const NMiniKQL::TUnboxedValueBatch& data) override {
         YQL_ENSURE(!Closed);
         if (data.empty()) {
             return;
@@ -719,7 +719,7 @@ public:
         ShardIds.insert(shardIter->ShardId);
     }
 
-    void AddData(NMiniKQL::TUnboxedValueBatch&& data) override {
+    void AddData(const NMiniKQL::TUnboxedValueBatch& data) override {
         YQL_ENSURE(!Closed);
 
         TRowBuilder rowBuilder(Columns.size());
@@ -1062,7 +1062,6 @@ public:
     void OnPartitioningChanged(
         NSchemeCache::TSchemeCacheNavigate::TEntry&& schemeEntry,
         NSchemeCache::TSchemeCacheRequest::TEntry&& partitionsEntry) override {
-        Cerr << "OnPartitioningChanged" << Endl;
         SchemeEntry = std::move(schemeEntry);
         PartitionsEntry = std::move(partitionsEntry);
         BeforePartitioningChanged();
@@ -1134,24 +1133,26 @@ public:
         return token;
     }
 
-    void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) override {
+    void Write(TWriteToken token, const NMiniKQL::TUnboxedValueBatch& data) override {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
-        YQL_ENSURE(!WriteInfos.at(token).Closed);
+        auto& info = WriteInfos.at(token);
+        YQL_ENSURE(!info.Closed);
 
         auto allocGuard = TypeEnv.BindAllocator();
-        YQL_ENSURE(WriteInfos.at(token).Serializer);
-        WriteInfos.at(token).Serializer->AddData(std::move(data));
+        YQL_ENSURE(info.Serializer);
+        info.Serializer->AddData(data);
 
         FlushSerializer(token, GetMemory() >= Settings.MemoryLimitTotal);
     }
 
     void Close(TWriteToken token) override {
         auto allocGuard = TypeEnv.BindAllocator();
-        YQL_ENSURE(WriteInfos.at(token).Serializer);
-        WriteInfos.at(token).Closed = true;
-        WriteInfos.at(token).Serializer->Close();
+        auto& info = WriteInfos.at(token);
+        YQL_ENSURE(info.Serializer);
+        info.Closed = true;
+        info.Serializer->Close();
         FlushSerializer(token, true);
-        YQL_ENSURE(WriteInfos.at(token).Serializer->IsFinished());
+        YQL_ENSURE(info.Serializer->IsFinished());
     }
 
     void Close() override {
@@ -1277,7 +1278,6 @@ public:
     bool IsReady() const override {
         for (TWriteToken token = 0; token < CurrentWriteToken; ++token) {
             const auto& writeInfo = WriteInfos.at(token);
-            Cerr << "CTL::" << token << " " << (writeInfo.Serializer == nullptr) << Endl;
             if (!writeInfo.Serializer && !writeInfo.Closed) {
                 return false;
             }

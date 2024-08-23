@@ -120,7 +120,7 @@ namespace NKqp {
 struct IKqpTableWriterCallbacks {
     virtual ~IKqpTableWriterCallbacks() = default;
 
-    virtual void OnPrepared() = 0;
+    virtual void OnReady(const TTableId& tableId) = 0;
 
     virtual void OnPrepared(IKqpWriteBuffer::TPreparedInfo&& preparedInfo) = 0;
 
@@ -186,7 +186,6 @@ public:
         , InconsistentTx(inconsistentTx)
         , Callbacks(callbacks)
     {
-        Cerr << "CREATED WRITE ACTOR:: " << this->SelfId() << Endl;
         try {
             ShardedWriteController = CreateShardedWriteController(
                 TShardedWriteControllerSettings {
@@ -207,7 +206,6 @@ public:
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
-        Cerr << "WRITE ACTOR:: " << this->SelfId() << " POOL " << this->SelfId().PoolID() << Endl;
         ResolveTable();
         Become(&TKqpTableWriteActor::StateProcessing);
     }
@@ -255,12 +253,12 @@ public:
         return token;
     }
 
-    void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) {
+    void Write(TWriteToken token, const NMiniKQL::TUnboxedValueBatch& data) {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
         YQL_ENSURE(!Closed);
         YQL_ENSURE(ShardedWriteController);
         try {
-            ShardedWriteController->Write(token, std::move(data));
+            ShardedWriteController->Write(token, data);
         } catch (...) {
             RuntimeError(
                 CurrentExceptionMessage(),
@@ -358,7 +356,6 @@ public:
     }
 
     void Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev) {
-        Cerr << " RESOLVE FIRST " << ev->Get()->Request->ErrorCount << Endl;
         if (ev->Get()->Request->ErrorCount > 0) {
             CA_LOG_E(TStringBuilder() << "Failed to get table: "
                 << TableId << "'");
@@ -418,8 +415,6 @@ public:
         YQL_ENSURE(!SchemeRequest || InconsistentTx);
         auto* request = ev->Get()->Request.Get();
 
-        Cerr << " RESOLVE SECOND " << request->ErrorCount << Endl;
-
         if (request->ErrorCount > 0) {
             CA_LOG_E(TStringBuilder() << "Failed to get table: "
                 << TableId << "'");
@@ -459,7 +454,6 @@ public:
         case NKikimrDataEvents::TEvWriteResult::STATUS_PREPARED: {
             const auto& result = ev->Get()->Record;
             IKqpWriteBuffer::TPreparedInfo preparedInfo;
-            Cerr << "PREPARED:: " << result.GetMinStep() << " - " << result.GetMaxStep() << Endl;
             preparedInfo.ShardId = result.GetOrigin();
             preparedInfo.MinStep = result.GetMinStep();
             preparedInfo.MaxStep = result.GetMaxStep();
@@ -672,7 +666,6 @@ public:
                 *locks->AddLocks() = *lock;
             }
         } else if (Closed && isPrepare) {
-            Cerr << "HERE" << Endl;
             evWrite->Record.SetTxId(TxId);
             // NOT TRUE:: // Last immediate write (only for datashard)
             const auto lock = LocksManager.GetLock(shardId);
@@ -691,12 +684,6 @@ public:
         const auto serializationResult = ShardedWriteController->SerializeMessageToPayload(shardId, *evWrite);
         YQL_ENSURE(serializationResult.TotalDataSize > 0);
 
-        Cerr << "Send EvWrite to ShardID=" << shardId << ", isPrepare=" << isPrepare << ", isImmediateCommit=" << isImmediateCommit << ", TxId=" << evWrite->Record.GetTxId()
-            << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId() << ", Locks=" << evWrite->Record.GetLocks().ShortDebugString()
-            << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
-            << ", Operations=" << metadata->OperationsCount << ", IsFinal=" << metadata->IsFinal
-            << ", Attempts=" << metadata->SendAttempts << Endl;
-
         CA_LOG_D("Send EvWrite to ShardID=" << shardId << ", isPrepare=" << isPrepare << ", isImmediateCommit=" << isImmediateCommit << ", TxId=" << evWrite->Record.GetTxId()
             << ", LockTxId=" << evWrite->Record.GetLockTxId() << ", LockNodeId=" << evWrite->Record.GetLockNodeId()
             << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
@@ -711,7 +698,6 @@ public:
         ShardedWriteController->OnMessageSent(shardId, metadata->Cookie);
 
         if (InconsistentTx) {
-            Cerr << "TEvShardRequestTimeout" << Endl;
             TlsActivationContext->Schedule(
                 CalculateNextAttemptDelay(metadata->SendAttempts),
                 new IEventHandle(
@@ -778,7 +764,7 @@ public:
                 NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
 
-        Callbacks->OnPrepared();
+        Callbacks->OnReady(TableId);
     }
 
     void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {}) {
@@ -786,13 +772,11 @@ public:
     }
 
     void PassAway() override {;
-        Cerr << "PassAway>> WRITE ACTOR:: " << this->SelfId() << " POOL " << this->SelfId().PoolID() << Endl;
         Send(PipeCacheId, new TEvPipeCache::TEvUnlink(0));
         TActorBootstrapped<TKqpTableWriteActor>::PassAway();
     }
 
     void Terminate() {
-        Cerr << "WRITE ACTOR:: SEND TERMINATE" << Endl;
         Send(this->SelfId(), new TEvPrivate::TEvTerminate{});
     }
 
@@ -849,7 +833,6 @@ public:
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
-        Cerr << "TEST" << Settings.GetTable().GetPath() << Endl;
 
         WriteTableActor = new TKqpTableWriteActor(
             this,
@@ -921,7 +904,7 @@ private:
         EgressStats.Resume();
         Y_UNUSED(size);
 
-        WriteTableActor->Write(*WriteToken, std::move(data));
+        WriteTableActor->Write(*WriteToken, data);
         if (Closed) {
             WriteTableActor->Close(*WriteToken);
             WriteTableActor->Close();
@@ -969,7 +952,7 @@ private:
         Callbacks->ResumeExecution();
     }
 
-    void OnPrepared() override {
+    void OnReady(const TTableId&) override {
         Process();
     }
 
@@ -1030,14 +1013,23 @@ struct TWriteSettings {
     TVector<NKikimrKqp::TKqpColumnMetadataProto> Columns;
 };
 
-struct TEvBufferWrite : public TEventLocal<TEvBufferWrite, TKqpBufferEvents::EvBufferWrite> {
+struct TBufferWriteMessage {
+    TActorId From;
+    TWriteToken Token;
+    bool Close = false;
+    std::shared_ptr<TVector<NMiniKQL::TUnboxedValueBatch>> Data;
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
+};
+
+struct TEvBufferWrite : public TEventLocal<TEvBufferWrite, TKqpEvents::EvBufferWrite> {
     bool Close = false;
     std::optional<TWriteToken> Token;
     std::optional<TWriteSettings> Settings;
-    TVector<NMiniKQL::TUnboxedValueBatch> Data;
+    std::shared_ptr<TVector<NMiniKQL::TUnboxedValueBatch>> Data;
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 };
 
-struct TEvBufferWriteResult : public TEventLocal<TEvBufferWriteResult, TKqpBufferEvents::EvBufferWriteResult> {
+struct TEvBufferWriteResult : public TEventLocal<TEvBufferWriteResult, TKqpEvents::EvBufferWriteResult> {
     TWriteToken Token;
 };
 
@@ -1047,6 +1039,7 @@ struct TEvBufferWriteResult : public TEventLocal<TEvBufferWriteResult, TKqpBuffe
 class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, public IKqpWriteBuffer, public IKqpTableWriterCallbacks {
     using TBase = TActorBootstrapped<TKqpBufferWriteActor>;
 
+public:
     struct TEvPrivate {
         enum EEv {
             EvTerminate = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
@@ -1079,15 +1072,21 @@ public:
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
-        Become(&TKqpBufferWriteActor::StateFunc);
+        Become(&TKqpBufferWriteActor::StateFuncBuf);
     }
 
     static constexpr char ActorName[] = "KQP_BUFFER_WRITE_ACTOR";
 
-    STFUNC(StateFunc) {
-        switch (ev->GetTypeRewrite()) {
-            hFunc(TEvPrivate::TEvTerminate, Handle);
-            hFunc(TEvBufferWrite, Handle);
+    STFUNC(StateFuncBuf) {
+        try {
+            switch (ev->GetTypeRewrite()) {
+                hFunc(TEvPrivate::TEvTerminate, Handle);
+                hFunc(TEvBufferWrite, Handle);
+            default:
+                AFL_ENSURE(false)("unknown message", ev->GetTypeRewrite());
+            }
+        } catch (const yexception& e) {
+            OnError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR, {});
         }
     }
 
@@ -1097,22 +1096,56 @@ public:
 
 
     void Handle(TEvBufferWrite::TPtr& ev) {
-        auto result = std::make_unique<TEvBufferWriteResult>();
+        TBufferWriteMessage message;
+        message.From = ev->Sender;
+        message.Close = ev->Get()->Close;
+        message.Data = ev->Get()->Data;
+        message.Alloc = ev->Get()->Alloc;
+
         if (!ev->Get()->Token) {
             AFL_ENSURE(ev->Get()->Settings);
-            result->Token = Open(std::move(*ev->Get()->Settings));
+            message.Token = Open(std::move(*ev->Get()->Settings));
         } else {
-            result->Token = ev->Token;
+            message.Token = *ev->Get()->Token;
         }
-        if (!ev->Get()->Data.empty()) {
-            for (auto& data : ev->Get()->Data) {
-                Write(result->Token, std::move(data));
+
+        DataQueues[message.Token.TableId].push_back(message);
+        ProcessQueue(message.Token.TableId);
+    }
+
+    void ProcessQueue(const TTableId& tableId) {
+        auto& queue = DataQueues.at(tableId);
+        auto& writeInfo = WriteInfos.at(tableId);
+
+        if (!writeInfo.WriteTableActor->IsReady()) {
+            return;
+        }
+
+        while (!queue.empty()) {
+            auto& message = queue.front();
+
+            if (!message.Data->empty()) {
+                for (const auto& data : *message.Data) {
+                    Write(message.Token, data);
+                }
             }
+            if (message.Close) {
+                Close(message.Token);
+            }
+
+            auto result = std::make_unique<TEvBufferWriteResult>();
+            result->Token = message.Token;
+
+            Send(message.From, result.release());
+
+            {
+                TGuard guard(*message.Alloc);
+                message.Data = nullptr;
+            }
+            queue.pop_front();
         }
-        if (ev->Get()->Close) {
-            Close(result->Token);   
-        }
-        Send(ev->Get()->Origin, result.release());
+
+        Process();
     }
 
     TWriteToken Open(TWriteSettings&& settings) {
@@ -1131,7 +1164,6 @@ public:
                 TypeEnv,
                 Alloc);
             info.WriteTableActorId = RegisterWithSameMailbox(info.WriteTableActor);
-            Cerr << "OPEN NEW ACTOR :: " << info.WriteTableActorId << Endl;
             State = EState::WAITING;
         }
 
@@ -1139,12 +1171,11 @@ public:
         return {settings.TableId, std::move(writeToken)};
     }
 
-    void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) {
+    void Write(TWriteToken token, const NMiniKQL::TUnboxedValueBatch& data) {
         YQL_ENSURE(State == EState::WRITING || State == EState::WAITING);
 
         auto& info = WriteInfos.at(token.TableId);
-        info.WriteTableActor->Write(token.Cookie,std::move(data));
-        Process();
+        info.WriteTableActor->Write(token.Cookie, data);
     }
 
     void Close(TWriteToken token) {
@@ -1152,7 +1183,6 @@ public:
 
         auto& info = WriteInfos.at(token.TableId);
         info.WriteTableActor->Close(token.Cookie);
-        Process();
     }
 
     THashMap<ui64, NKikimrDataEvents::TLock> GetLocks(TWriteToken token) const {
@@ -1180,14 +1210,12 @@ public:
 
     void Flush(std::function<void()> callback) override {
         State = EState::FLUSHING;
-        Cerr << "SET FLUSH CALLBACK" << Endl;
-        OnFlushedCallback = callback;//std::move(callback);
+        OnFlushedCallback = callback;
         Close();
         Process();
     }
 
     void Prepare(std::function<void(TPreparedInfo&& preparedInfo)> callback, TPrepareSettings&& prepareSettings) override {
-        Cerr << "PREPARE "  << static_cast<ui64>(State) << Endl;
         YQL_ENSURE(State == EState::WRITING);
         Y_UNUSED(callback, prepareSettings);
         State = EState::PREPARING;
@@ -1268,10 +1296,19 @@ public:
     }
 
     void PassAway() override {
+        for (auto& [_, queue] : DataQueues) {
+            while (!queue.empty()) {
+                auto& message = queue.front();
+                {
+                    TGuard guard(*message.Alloc);
+                    message.Data = nullptr;
+                }
+                queue.pop_front();
+            }
+        }
+        
         for (auto& [_, info] : WriteInfos) {
-            Cerr << "FOUND WRITE ACTOR: " << info.WriteTableActorId << Endl;
             if (info.WriteTableActor) {
-                Cerr << "TERMINATE WRITE ACTOR " << info.WriteTableActorId << Endl;
                 info.WriteTableActor->Terminate();
             }
         }
@@ -1341,15 +1378,10 @@ public:
     void ResumeExecution() {
         CA_LOG_D("Resuming execution.");
         State = EState::WRITING;
-        for (auto& [_, info] : WriteInfos) {
-            for (auto& [_, callback] : info.ResumeExecutionCallbacks) {
-                callback();
-            }
-        }
     }
 
-    void OnPrepared() override {
-        Process();
+    void OnReady(const TTableId& tableId) override {
+        ProcessQueue(tableId);
     }
 
     void OnPrepared(IKqpWriteBuffer::TPreparedInfo&& preparedInfo) override {
@@ -1393,6 +1425,8 @@ private:
     std::function<void(ui64)> OnCommitCallback;
     IKqpWriteBufferCallbacks* Callbacks = nullptr;
 
+    THashMap<TTableId, std::deque<TBufferWriteMessage>> DataQueues;
+
     const i64 MemoryLimit = kInFlightMemoryLimitPerActor;
 };
 
@@ -1409,41 +1443,58 @@ public:
         , OutputIndex(args.OutputIndex)
         , Callbacks(args.Callback)
         , Counters(counters)
-        , BufferWriter(reinterpret_cast<TKqpBufferWriteActor*>(Settings.GetBufferPtr()))
-        , BufferActorId(BufferWriter->SelfId())
+        , TypeEnv(args.TypeEnv)
+        , Alloc(args.Alloc)
+        , BufferActorId(ActorIdFromProto(Settings.GetBufferActorId()))
         , TxId(std::get<ui64>(args.TxId))
         , TableId(
             Settings.GetTable().GetOwnerId(),
             Settings.GetTable().GetTableId(),
             Settings.GetTable().GetVersion())
     {
-        Cerr << "FWD::" << TxId << " " << Settings.GetLockTxId() << " " << Settings.GetLockNodeId() << " " << BufferWriter->SelfId()  << Endl;
-        YQL_ENSURE(BufferWriter != nullptr);
         EgressStats.Level = args.StatsLevel;
     }
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
+        Become(&TKqpForwardWriteActor::StateFuncFwd);
     }
 
     static constexpr char ActorName[] = "KQP_FORWARD_WRITE_ACTOR";
 
 private:
-    STFUNC(StateFunc) {
-        switch (ev->GetTypeRewrite()) {
-            hFunc(TEvBufferWriteResult, Handle);
+    STFUNC(StateFuncFwd) {
+        try {
+            switch (ev->GetTypeRewrite()) {
+                hFunc(TEvBufferWriteResult, Handle);
+            default:
+                AFL_ENSURE(false)("unknown message", ev->GetTypeRewrite());
+            }
+        } catch (const yexception& e) {
+            RuntimeError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR);
         }
     }
 
     void Handle(TEvBufferWriteResult::TPtr& result) {
         WriteToken = result->Get()->Token;
+        DataSize = 0;
+        {
+            auto alloc = TypeEnv.BindAllocator();
+            Data = nullptr;
+        }
+
+        if (Closed) {
+            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
+        }
+        Callbacks->ResumeExecution();
     }
 
     void WriteToBuffer() {
         auto ev = std::make_unique<TEvBufferWrite>();
 
-        ev->Data = std::move(Data);
+        ev->Data = Data;
         ev->Close = Closed;
+        ev->Alloc = Alloc;
 
         if (!WriteToken.IsEmpty()) {
             ev->Token = WriteToken;
@@ -1462,18 +1513,11 @@ private:
             };
         }
 
-        Send(BufferActorId, ev.release());
-
+        AFL_ENSURE(Send(BufferActorId, ev.release()));
         EgressStats.Bytes += DataSize;
         EgressStats.Chunks++;
         EgressStats.Splits++;
         EgressStats.Resume();
-
-        Data.clear();
-        DataSize = 0;
-    }
-
-    virtual ~TKqpForwardWriteActor() {
     }
 
     void CommitState(const NYql::NDqProto::TCheckpoint&) final {};
@@ -1488,23 +1532,27 @@ private:
     }
 
     i64 GetFreeSpace() const final {
-        return kMaxForwardedSize - DataSize;
+        return kMaxForwardedSize - DataSize > 0
+            ? kMaxForwardedSize - DataSize
+            : std::numeric_limits<i64>::min();
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
-        //google::protobuf::Any result;
-        return {};//result;
+        return {};
     }
 
     void SendData(NMiniKQL::TUnboxedValueBatch&& data, i64 size, const TMaybe<NYql::NDqProto::TCheckpoint>&, bool finished) final {
         YQL_ENSURE(!data.IsWide(), "Wide stream is not supported yet");
+        Closed |= finished;
+        if (!Data) {
+            Data = std::make_shared<TVector<NMiniKQL::TUnboxedValueBatch>>();
+        }
 
-        Data.emplace_back(std::move(data));
+        Data->emplace_back(std::move(data));
         DataSize += size;
 
-        if (finished || GetFreeSpace() <= 0) {
+        if (Closed || GetFreeSpace() <= 0) {
             WriteToBuffer();
-            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
         }
     }
 
@@ -1521,6 +1569,10 @@ private:
     }
 
     void PassAway() override {
+        {
+            auto alloc = TypeEnv.BindAllocator();
+            Data = nullptr;
+        }
         TActorBootstrapped<TKqpForwardWriteActor>::PassAway();
     }
 
@@ -1530,11 +1582,12 @@ private:
     NYql::NDq::TDqAsyncStats EgressStats;
     NYql::NDq::IDqComputeActorAsyncOutput::ICallbacks * Callbacks = nullptr;
     TIntrusivePtr<TKqpCounters> Counters;
+    const NMiniKQL::TTypeEnvironment& TypeEnv;
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
-    TKqpBufferWriteActor* BufferWriter = nullptr;
     TActorId BufferActorId;
 
-    TVector<NMiniKQL::TUnboxedValueBatch> Data;
+    std::shared_ptr<TVector<NMiniKQL::TUnboxedValueBatch>> Data;
     i64 DataSize = 0;
     bool Closed = false;
 
@@ -1554,8 +1607,7 @@ void RegisterKqpWriteActor(NYql::NDq::TDqAsyncIoFactory& factory, TIntrusivePtr<
     factory.RegisterSink<NKikimrKqp::TKqpTableSinkSettings>(
         TString(NYql::KqpTableSinkName),
         [counters] (NKikimrKqp::TKqpTableSinkSettings&& settings, NYql::NDq::TDqAsyncIoFactory::TSinkArguments&& args) {
-            Cerr << "RegisterKqpWriteActor::" << std::get<ui64>(args.TxId) << " " << settings.GetLockTxId() << " " << settings.GetLockNodeId() << Endl;
-            if (settings.GetBufferPtr() == 0) {
+            if (!ActorIdFromProto(settings.GetBufferActorId())) {
                 auto* actor = new TKqpDirectWriteActor(std::move(settings), std::move(args), counters);
                 return std::make_pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*>(actor, actor);
             } else {

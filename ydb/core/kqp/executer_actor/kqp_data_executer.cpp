@@ -2026,8 +2026,9 @@ private:
             //settings.Callbacks = BufferWriterCallbacks.get();
             auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
             BufferWriter = writer;
+            BufferWriterActor = actor;
             BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
-            RegisterWithSameMailbox(actor);
+            BufferWriterActorId = RegisterWithSameMailbox(actor);
         } else {
             BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
         }

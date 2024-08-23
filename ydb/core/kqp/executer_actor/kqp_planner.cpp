@@ -61,7 +61,7 @@ bool NeedToRunLocally(const TTask& task) {
             YQL_ENSURE(settingsAny.Is<NKikimrKqp::TKqpTableSinkSettings>());
             NKikimrKqp::TKqpTableSinkSettings settings;
             YQL_ENSURE(settingsAny.UnpackTo(&settings));
-            if (settings.GetBufferPtr() != 0) {
+            if (ActorIdFromProto(settings.GetBufferActorId())) {
                 // We need to run compute actor locally if it uses buffer actor.
                 return true;
             }

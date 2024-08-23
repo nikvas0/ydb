@@ -935,7 +935,7 @@ protected:
                 settings.SetLockTxId(*lockTxId);
                 settings.SetLockNodeId(SelfId().NodeId());
             }
-            settings.SetBufferPtr(reinterpret_cast<ui64>(BufferWriter));
+            ActorIdToProto(BufferWriterActorId, settings.MutableBufferActorId());
             output.SinkSettings.ConstructInPlace();
             output.SinkSettings->PackFrom(settings);
         } else {
@@ -2010,6 +2010,8 @@ protected:
     bool UnknownAffectedShardCount = false;
 
     IKqpWriteBuffer* BufferWriter = nullptr;
+    IActor* BufferWriterActor = nullptr;
+    TActorId BufferWriterActorId;
 
     THashMap<ui64, TActorId> ResultChannelToComputeActor;
     THashMap<NYql::NDq::TStageId, THashMap<ui64, TShardInfo>> SourceScanStageIdToParititions;

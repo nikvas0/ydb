@@ -28,7 +28,7 @@ public:
         const TTableId TableId,
         const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns) = 0;
-    virtual void Write(TWriteToken token, NMiniKQL::TUnboxedValueBatch&& data) = 0;
+    virtual void Write(TWriteToken token, const NMiniKQL::TUnboxedValueBatch& data) = 0;
     virtual void Close(TWriteToken token) = 0;
     virtual void Close() = 0;
 

@@ -44,7 +44,9 @@ struct TKqpEvents {
         EvListSessionsRequest,
         EvListSessionsResponse,
         EvListProxyNodesRequest,
-        EvListProxyNodesResponse
+        EvListProxyNodesResponse,
+        EvBufferWrite,
+        EvBufferWriteResult,
     };
 
     static_assert (EvCompileInvalidateRequest + 1 == EvAbortExecution);
@@ -175,13 +177,6 @@ struct TKqpWorkloadServiceEvents {
         EvCleanupRequest,
         EvCleanupResponse,
         EvUpdatePoolInfo,
-    };
-};
-
-struct TKqpBufferEvents {
-    enum EKqpBufferEvents {
-        EvBufferWrite = EventSpaceBegin(TKikimrEvents::ES_KQP) + 800,
-        EvBufferWriteResult, 
     };
 };
 

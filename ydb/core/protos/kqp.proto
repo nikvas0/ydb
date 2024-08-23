@@ -710,7 +710,7 @@ message TKqpTableSinkSettings {
     optional uint64 LockNodeId = 7;
     optional bool InconsistentTx = 8; // Write each batch in it's own single immediate tx
     optional EType Type = 9;
-    optional uint64 BufferPtr = 10;
+    optional NActorsProto.TActorId BufferActorId = 10;
 }
 
 message TKqpStreamLookupSettings {
