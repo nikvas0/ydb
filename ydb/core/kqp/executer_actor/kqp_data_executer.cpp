@@ -1804,7 +1804,7 @@ private:
         Cerr << "ExecuteBufferWriterTransactions:: PREPARE" << Endl;
 
         if (!ImmediateTx) {
-            BufferWriter->Prepare([this](IKqpWriteBuffer::TPreparedInfo&& preparedInfo) {
+            BufferWriter->Prepare([this](TPreparedInfo&& preparedInfo) {
                 TShardState* shardState = ShardStates.FindPtr(preparedInfo.ShardId);
                 YQL_ENSURE(shardState, "Unexpected propose result from unknown tabletId " << preparedInfo.ShardId);
 
@@ -1992,7 +1992,7 @@ private:
     }
 
     void PrepareBufferWriter() {
-        struct TBufferWriterCallbacks : public IKqpWriteBufferCallbacks {
+        /*struct TBufferWriterCallbacks : public IKqpWriteBufferCallbacks {
             void OnRuntimeError(
                 const TString& message,
                 NYql::NDqProto::StatusIds::StatusCode statusCode,
@@ -2011,7 +2011,7 @@ private:
 
             TKqpDataExecuter* Executer;
         };
-        BufferWriterCallbacks = std::make_unique<TBufferWriterCallbacks>(this);
+        BufferWriterCallbacks = std::make_unique<TBufferWriterCallbacks>(this);*/
         
         if (!BufferWriter) {
             TKqpBufferWriterSettings settings;
@@ -2027,10 +2027,10 @@ private:
             auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
             BufferWriter = writer;
             BufferWriterActor = actor;
-            BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
+            //BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
             BufferWriterActorId = RegisterWithSameMailbox(actor);
         } else {
-            BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
+            //BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
         }
     }
 
@@ -2973,8 +2973,8 @@ private:
     TDatashardTxs DatashardTxs;
     TEvWriteTxs EvWriteTxs;
     TTopicTabletTxs TopicTxs;
-    std::unique_ptr<IKqpWriteBufferCallbacks> BufferWriterCallbacks = nullptr;
-    IKqpWriteBuffer::TPrepareSettings BufferWriterPrepareSettings;
+    //std::unique_ptr<IKqpWriteBufferCallbacks> BufferWriterCallbacks = nullptr;
+    TPrepareSettings BufferWriterPrepareSettings;
 
     // Lock handle for a newly acquired lock
     TLockHandle LockHandle;

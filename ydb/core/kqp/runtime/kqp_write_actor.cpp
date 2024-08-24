@@ -122,7 +122,7 @@ struct IKqpTableWriterCallbacks {
 
     virtual void OnReady(const TTableId& tableId) = 0;
 
-    virtual void OnPrepared(IKqpWriteBuffer::TPreparedInfo&& preparedInfo) = 0;
+    virtual void OnPrepared(TPreparedInfo&& preparedInfo) = 0;
 
     //virtual void OnCommitted(ui64 shardId) = 0;
 
@@ -453,7 +453,7 @@ public:
         }
         case NKikimrDataEvents::TEvWriteResult::STATUS_PREPARED: {
             const auto& result = ev->Get()->Record;
-            IKqpWriteBuffer::TPreparedInfo preparedInfo;
+            TPreparedInfo preparedInfo;
             preparedInfo.ShardId = result.GetOrigin();
             preparedInfo.MinStep = result.GetMinStep();
             preparedInfo.MaxStep = result.GetMaxStep();
@@ -956,7 +956,7 @@ private:
         Process();
     }
 
-    void OnPrepared(IKqpWriteBuffer::TPreparedInfo&&) override {
+    void OnPrepared(TPreparedInfo&&) override {
     }
 
     void OnMessageAcknowledged(ui64 shardId, ui64 dataSize, bool isShardEmpty) override {
@@ -1090,9 +1090,9 @@ public:
         }
     }
 
-    void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) override {
-        Callbacks = callbacks;
-    }
+    //void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) override {
+    //    Callbacks = callbacks;
+    //}
 
 
     void Handle(TEvBufferWrite::TPtr& ev) {
@@ -1384,7 +1384,7 @@ public:
         ProcessQueue(tableId);
     }
 
-    void OnPrepared(IKqpWriteBuffer::TPreparedInfo&& preparedInfo) override {
+    void OnPrepared(TPreparedInfo&& preparedInfo) override {
         OnPreparedCallback(std::move(preparedInfo));
         Process();
     }
@@ -1399,7 +1399,10 @@ public:
     }
 
     void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) override {
-        Callbacks->OnRuntimeError(message, statusCode, subIssues);
+        Y_DEBUG_ABORT_UNLESS(false);
+        CA_LOG_E("Error: " << message << ". statusCode=" << statusCode << ". subIssues=" << subIssues.ToString());
+        Y_UNUSED(message, statusCode, subIssues);
+        //Callbacks->OnRuntimeError(message, statusCode, subIssues);
     }
 
 private:
@@ -1423,7 +1426,7 @@ private:
     std::function<void()> OnFlushedCallback;
     std::function<void(TPreparedInfo&& preparedInfo)> OnPreparedCallback;
     std::function<void(ui64)> OnCommitCallback;
-    IKqpWriteBufferCallbacks* Callbacks = nullptr;
+    //IKqpWriteBufferCallbacks* Callbacks = nullptr;
 
     THashMap<TTableId, std::deque<TBufferWriteMessage>> DataQueues;
 

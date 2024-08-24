@@ -9,13 +9,26 @@
 namespace NKikimr {
 namespace NKqp {
 
-struct IKqpWriteBufferCallbacks {
+/*struct IKqpWriteBufferCallbacks {
     virtual ~IKqpWriteBufferCallbacks() {}
 
     virtual void OnRuntimeError(
         const TString& message,
         NYql::NDqProto::StatusIds::StatusCode statusCode,
         const NYql::TIssues& subIssues) = 0;
+};*/
+
+struct TPrepareSettings {
+    THashSet<ui64> SendingShards;
+    THashSet<ui64> ReceivingShards;
+    std::optional<ui64> ArbiterShard;
+};
+
+struct TPreparedInfo {
+    ui64 ShardId;
+    ui64 MinStep;
+    ui64 MaxStep;
+    TVector<ui64> Coordinators;
 };
 
 // TODO: move somewhere else
@@ -23,24 +36,11 @@ class IKqpWriteBuffer {
 public:
     virtual ~IKqpWriteBuffer() = default;
 
-    virtual void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) = 0;
+    //virtual void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) = 0;
 
     // Only when all writes are closed!
     virtual void Flush(std::function<void()> callback) = 0;
     //virtual void Flush(TTableId tableId) = 0;
-
-    struct TPrepareSettings {
-        THashSet<ui64> SendingShards;
-        THashSet<ui64> ReceivingShards;
-        std::optional<ui64> ArbiterShard;
-    };
-
-    struct TPreparedInfo {
-        ui64 ShardId;
-        ui64 MinStep;
-        ui64 MaxStep;
-        TVector<ui64> Coordinators;
-    };
 
     virtual void Prepare(std::function<void(TPreparedInfo&&)> callback, TPrepareSettings&& prepareSettings) = 0;
     virtual void OnCommit(std::function<void(ui64)> callback) = 0;
@@ -60,7 +60,6 @@ struct TKqpBufferWriterSettings {
     ui64 LockTxId = 0;
     ui64 LockNodeId = 0;
     bool InconsistentTx = false;
-    //IKqpWriteBufferCallbacks* Callbacks = nullptr;
 };
 
 std::pair<IKqpWriteBuffer*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings);
