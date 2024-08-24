@@ -9,14 +9,6 @@
 namespace NKikimr {
 namespace NKqp {
 
-/*struct IKqpWriteBufferCallbacks {
-    virtual ~IKqpWriteBufferCallbacks() {}
-
-    virtual void OnRuntimeError(
-        const TString& message,
-        NYql::NDqProto::StatusIds::StatusCode statusCode,
-        const NYql::TIssues& subIssues) = 0;
-};*/
 
 struct TPrepareSettings {
     THashSet<ui64> SendingShards;
@@ -35,8 +27,6 @@ struct TPreparedInfo {
 class IKqpWriteBuffer {
 public:
     virtual ~IKqpWriteBuffer() = default;
-
-    //virtual void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) = 0;
 
     // Only when all writes are closed!
     virtual void Flush(std::function<void()> callback) = 0;

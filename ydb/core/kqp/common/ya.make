@@ -27,10 +27,11 @@ PEERDIR(
     ydb/core/base
     ydb/core/engine
     ydb/core/kqp/expr_nodes
-    ydb/core/kqp/common/simple
+    ydb/core/kqp/common/buffer
     ydb/core/kqp/common/compilation
     ydb/core/kqp/common/events
     ydb/core/kqp/common/shutdown
+    ydb/core/kqp/common/simple
     ydb/core/kqp/provider
     ydb/core/tx/long_tx_service/public
     ydb/core/tx/sharding
