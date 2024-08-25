@@ -1991,45 +1991,12 @@ private:
         return NKqp::HasOlapTableWriteInStage(stage, tables);
     }
 
-    void PrepareBufferWriter() {
-        /*struct TBufferWriterCallbacks : public IKqpWriteBufferCallbacks {
-            void OnRuntimeError(
-                const TString& message,
-                NYql::NDqProto::StatusIds::StatusCode statusCode,
-                const NYql::TIssues& subIssues) override {
-
-                NYql::TIssue issue(message);
-                for (const auto& i : subIssues) {
-                    issue.AddSubIssue(MakeIntrusive<NYql::TIssue>(i));
-                }
-
-                Executer->ReplyErrorAndDie(DqStatusToYdbStatus(statusCode), issue);
-            }
-
-            TBufferWriterCallbacks(TKqpDataExecuter* executer)
-                : Executer(executer) {}
-
-            TKqpDataExecuter* Executer;
-        };
-        BufferWriterCallbacks = std::make_unique<TBufferWriterCallbacks>(this);*/
-        
-        if (!BufferWriter) {
-            TKqpBufferWriterSettings settings;
-            auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
-            BufferWriter = writer;
-            BufferWriterActor = actor;
-            //BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
-            BufferWriterActorId = RegisterWithSameMailbox(actor);
-        } else {
-            //BufferWriter->SetOnRuntimeError(BufferWriterCallbacks.get());
-        }
-    }
-
     void Execute() {
         LWTRACK(KqpDataExecuterStartExecute, ResponseEv->Orbit, TxId);
 
-        if (UseEvWrite && !ReadOnlyTx) {
-            PrepareBufferWriter();
+        if (BufferWriter) {
+            // TODO: leave only id
+            BufferWriterActorId = BufferWriter->GetActorId();
         }
 
         size_t sourceScanPartitionsCount = 0;

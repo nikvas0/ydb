@@ -1333,6 +1333,10 @@ public:
         Send(SelfId(), new TEvPrivate::TEvTerminate{});
     }
 
+    TActorId GetActorId() const override {
+        return SelfId();
+    }
+
     void Process() {
         if (GetTotalFreeSpace() <= 0) {
             State = EState::WAITING;
