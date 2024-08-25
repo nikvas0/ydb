@@ -53,7 +53,8 @@ struct TEvError : public TEventLocal<TEvError, TKqpBufferWriterEvents::EvError> 
     TEvError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues);
 };
 
-//TODO: terminate
+struct TEvTerminate : public TEventLocal<TEvTerminate, TKqpBufferWriterEvents::EvTerminate> {
+};
 
 };
 

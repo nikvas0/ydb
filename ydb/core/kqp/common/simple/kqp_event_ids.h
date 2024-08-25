@@ -189,6 +189,7 @@ struct TKqpBufferWriterEvents {
         EvRollback,
         EvFlush,
         EvError,
+        EvTerminate,
     };
 };
 

@@ -30,8 +30,6 @@ public:
 
     virtual bool IsFinished() const = 0;
 
-    virtual void Terminate() = 0;
-
     virtual TActorId GetActorId() const = 0;
 };
 

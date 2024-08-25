@@ -2841,12 +2841,6 @@ private:
             Send(MakePipePerNodeCacheID(true), new TEvPipeCache::TEvUnlink(0));
         }
 
-        if (BufferWriter && (Request.LocksOp != ELocksOp::Unspecified || Request.NeedToFlush)) {
-            // commit or rollback
-            // TODO: think about rollback after failed commit: it can crash
-            BufferWriter->Terminate();
-        }
-
         TBase::PassAway();
     }
 

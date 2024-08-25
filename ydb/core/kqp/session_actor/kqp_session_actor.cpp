@@ -1055,12 +1055,6 @@ public:
                     || QueryState->Commit && !QueryState->Commited;
 
         if (!haveWork) {
-            /*if (BufferWriter) {
-                Cerr << "TEST:: TERMINATE BUFFER WRITER" << Endl;
-                YQL_ENSURE(BufferWriter->IsFinished());
-                BufferWriter->Terminate();
-                BufferWriter = nullptr;
-            }*/
             ReplySuccess();
             return;
         }
@@ -1296,6 +1290,7 @@ public:
             auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
             RegisterWithSameMailbox(actor);
             BufferWriter = writer;
+            BufferActorId = writer->GetActorId();
         }
         auto executerActor = CreateKqpExecuter(std::move(request), Settings.Database,
             QueryState ? QueryState->UserToken : TIntrusiveConstPtr<NACLib::TUserToken>(),
@@ -1478,8 +1473,6 @@ public:
         }
 
         YQL_ENSURE(QueryState);
-
-        BufferWriter = ev->BufferWriter;
 
         UpdateTempTablesState();
 
@@ -2066,6 +2059,10 @@ public:
     void Cleanup(bool isFinal = false) {
         isFinal = isFinal || QueryState && !QueryState->KeepSession;
 
+        if (BufferActorId) {
+            Send(BufferActorId, new TEvKqpBuffer::TEvTerminate{});
+        }
+
         if (QueryState && QueryState->TxCtx) {
             auto& txCtx = QueryState->TxCtx;
             if (txCtx->IsInvalidated()) {
@@ -2588,6 +2585,7 @@ private:
     TGUCSettings::TPtr GUCSettings;
 
     IKqpWriteBuffer* BufferWriter = nullptr;
+    TActorId BufferActorId;
 };
 
 } // namespace

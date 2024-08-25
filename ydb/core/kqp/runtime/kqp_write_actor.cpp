@@ -1046,15 +1046,6 @@ class TKqpBufferWriteActor :public TActorBootstrapped<TKqpBufferWriteActor>, pub
     using TBase = TActorBootstrapped<TKqpBufferWriteActor>;
 
 public:
-    struct TEvPrivate {
-        enum EEv {
-            EvTerminate = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
-        };
-
-        struct TEvTerminate : public TEventLocal<TEvTerminate, EvTerminate> {
-        };
-    };
-
     enum class EState {
         WAITING, // Out of memory, wait for free memory. Can't accept any writes in this state.
         WRITING, // Allow to write data to buffer (there is free memory).
@@ -1086,7 +1077,7 @@ public:
     STFUNC(StateFuncBuf) {
         try {
             switch (ev->GetTypeRewrite()) {
-                hFunc(TEvPrivate::TEvTerminate, Handle);
+                hFunc(TEvKqpBuffer::TEvTerminate, Handle);
                 hFunc(TEvBufferWrite, Handle);
             default:
                 AFL_ENSURE(false)("unknown message", ev->GetTypeRewrite());
@@ -1325,12 +1316,8 @@ public:
         TActorBootstrapped<TKqpBufferWriteActor>::PassAway();
     }
 
-    void Handle(TEvPrivate::TEvTerminate::TPtr&) {
+    void Handle(TEvKqpBuffer::TEvTerminate::TPtr&) {
         PassAway();
-    }
-
-    void Terminate() override {
-        Send(SelfId(), new TEvPrivate::TEvTerminate{});
     }
 
     TActorId GetActorId() const override {
