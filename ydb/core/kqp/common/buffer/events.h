@@ -1,6 +1,8 @@
 #pragma once
 
 #include <ydb/core/kqp/common/simple/kqp_event_ids.h>
+#include <ydb/library/yql/dq/actors/protos/dq_status_codes.pb.h>
+#include <ydb/library/yql/public/issue/yql_issue.h>
 
 
 namespace NKikimr {
@@ -13,11 +15,6 @@ struct TPrepareSettings {
     std::optional<ui64> ArbiterShard;
 };
 
-
-struct TEvBufferPrepare : public TEventLocal<TEvBufferPrepare, TKqpBufferWriterEvents::EvPrepare> {
-    TPrepareSettings Settings;
-};
-
 struct TPreparedInfo {
     ui64 ShardId;
     ui64 MinStep;
@@ -25,24 +22,39 @@ struct TPreparedInfo {
     TVector<ui64> Coordinators;
 };
 
-struct TEvBufferPrepared : public TEventLocal<TEvBufferPrepared, TKqpBufferWriterEvents::EvPrepared> {
+struct TEvKqpBuffer {
+
+struct TEvPrepare : public TEventLocal<TEvPrepare, TKqpBufferWriterEvents::EvPrepare> {
+    TPrepareSettings Settings;
+};
+
+struct TEvPrepared : public TEventLocal<TEvPrepared, TKqpBufferWriterEvents::EvPrepared> {
     TPreparedInfo Result;
 };
 
-struct TEvBufferCommit : public TEventLocal<TEvBufferCommit, TKqpBufferWriterEvents::EvCommit> {
+struct TEvCommit : public TEventLocal<TEvCommit, TKqpBufferWriterEvents::EvCommit> {
 };
 
-struct TEvBufferCommitted : public TEventLocal<TEvBufferCommitted, TKqpBufferWriterEvents::EvCommitted> {
+struct TEvCommitted : public TEventLocal<TEvCommitted, TKqpBufferWriterEvents::EvCommitted> {
     ui64 ShardId;
 };
 
-struct TEvBufferRollback : public TEventLocal<TEvBufferRollback, TKqpBufferWriterEvents::EvRollback> {
+struct TEvRollback : public TEventLocal<TEvRollback, TKqpBufferWriterEvents::EvRollback> {
 };
 
-struct TEvBufferFlush : public TEventLocal<TEvBufferFlush, TKqpBufferWriterEvents::EvFlush> {
+struct TEvFlush : public TEventLocal<TEvFlush, TKqpBufferWriterEvents::EvFlush> {
 };
 
-struct TEvBufferError : public TEventLocal<TEvBufferError, TKqpBufferWriterEvents::EvError> {
+struct TEvError : public TEventLocal<TEvError, TKqpBufferWriterEvents::EvError> {
+    TString Message;
+    NYql::NDqProto::StatusIds::StatusCode StatusCode;
+    NYql::TIssues SubIssues;
+
+    TEvError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues);
+};
+
+//TODO: terminate
+
 };
 
 }

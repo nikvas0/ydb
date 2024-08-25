@@ -1068,7 +1068,7 @@ public:
 public:
     TKqpBufferWriteActor(
         TKqpBufferWriterSettings&& settings)
-        : Settings(std::move(settings))
+        : SessionActorId(settings.SessionActorId)
         , Alloc(std::make_shared<NKikimr::NMiniKQL::TScopedAlloc>(__LOCATION__))
         , TypeEnv(*Alloc)
     {
@@ -1417,15 +1417,19 @@ public:
     }
 
     void ReplyErrorAndDie(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) {
-        Y_DEBUG_ABORT_UNLESS(false);
-        CA_LOG_E("Error: " << message << ". statusCode=" << statusCode << ". subIssues=" << subIssues.ToString());
-        Y_UNUSED(message, statusCode, subIssues);
+        CA_LOG_E("Error: " << message << ". statusCode=" << NYql::NDqProto::StatusIds_StatusCode_Name(statusCode) << ". subIssues=" << subIssues.ToString());
+        Send(SessionActorId, new TEvKqpBuffer::TEvError{
+            message,
+            statusCode,
+            subIssues,
+        });
+        PassAway();
     }
 
 private:
     TString LogPrefix;
 
-    const TKqpBufferWriterSettings Settings;
+    const TActorId SessionActorId;
 
     bool HasWrites = false;
     ui64 LockTxId = 0;
@@ -1598,11 +1602,14 @@ private:
         Callbacks->OnAsyncOutputError(OutputIndex, std::move(issues), statusCode);
     }
 
-    void PassAway() override {
+    ~TKqpForwardWriteActor() {
         {
-            auto alloc = TypeEnv.BindAllocator();
+            TGuard guard(*Alloc);
             Data = nullptr;
         }
+    }
+
+    void PassAway() override {
         TActorBootstrapped<TKqpForwardWriteActor>::PassAway();
     }
 
