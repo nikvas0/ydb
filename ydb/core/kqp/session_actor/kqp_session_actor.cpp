@@ -1289,8 +1289,11 @@ public:
         const bool useEvWrite = ((HasOlapTable && Settings.TableService.GetEnableOlapSink()) || (!HasOlapTable && Settings.TableService.GetEnableOltpSink()))
             && (request.QueryType == NKikimrKqp::EQueryType::QUERY_TYPE_SQL_GENERIC_QUERY
                 || request.QueryType == NKikimrKqp::EQueryType::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY);
-        /*if (useEvWrite && !BufferWriter) { //&& !ReadOnlyTx) {
-            auto [writer, actor] = CreateKqpBufferWriterActor(TKqpBufferWriterSettings{});
+        /*if (useEvWrite && !BufferWriter && QueryState->TxCtx->TxHasEffects()) {
+            TKqpBufferWriterSettings settings {
+                .TxId = 
+            };
+            auto [writer, actor] = CreateKqpBufferWriterActor(settings);
             RegisterWithSameMailbox(actor);
             BufferWriter = writer;
         }*/

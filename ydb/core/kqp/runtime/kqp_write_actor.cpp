@@ -169,16 +169,13 @@ public:
         IKqpTableWriterCallbacks* callbacks,
         const TTableId& tableId,
         const TStringBuf tablePath,
-        const ui64 txId,
         const ui64 lockTxId,
         const ui64 lockNodeId,
         const bool inconsistentTx,
         const NMiniKQL::TTypeEnvironment& typeEnv,
         std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc)
-        : LogPrefix(TStringBuilder() << "TxId: " << txId << ". ")
-        , TypeEnv(typeEnv)
+        : TypeEnv(typeEnv)
         , Alloc(alloc)
-        , TxId(txId)
         , TableId(tableId)
         , TablePath(tablePath)
         , LockTxId(lockTxId)
@@ -590,8 +587,9 @@ public:
         }
     }
 
-    void SetPrepare() {
+    void SetPrepare(ui64 txId) {
         Mode = EMode::PREPARE;
+        TxId = txId;
         for (const auto shardId : ShardedWriteController->GetShardsIds()) {
             const auto metadata = ShardedWriteController->GetMessageMetadata(shardId);
             if (!metadata || (metadata->IsLast && metadata->SendAttempts != 0)) {
@@ -604,8 +602,9 @@ public:
         Mode = EMode::COMMIT;
     }
 
-    void SetImmediateCommit() {
+    void SetImmediateCommit(ui64 txId) {
         Mode = EMode::IMMEDIATE_COMMIT;
+        TxId = txId;
         // TODO: send data for empty
     }
 
@@ -786,7 +785,7 @@ public:
     const NMiniKQL::TTypeEnvironment& TypeEnv;
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
 
-    const ui64 TxId;
+    ui64 TxId = 0;
     const TTableId TableId;
     const TString TablePath;
 
@@ -838,7 +837,6 @@ public:
             this,
             TableId,
             Settings.GetTable().GetPath(),
-            TxId,
             Settings.GetLockTxId(),
             Settings.GetLockNodeId(),
             Settings.GetInconsistentTx(),
@@ -1006,11 +1004,19 @@ struct TWriteToken {
     }
 };
 
+struct TTransactionSettings {
+    ui64 TxId = 0;
+    ui64 LockTxId = 0;
+    ui64 LockNodeId = 0;
+    bool InconsistentTx = false;
+};
+
 struct TWriteSettings {
     TTableId TableId;
     TString TablePath; // for error messages
     NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
     TVector<NKikimrKqp::TKqpColumnMetadataProto> Columns;
+    TTransactionSettings TransactionSettings;
 };
 
 struct TBufferWriteMessage {
@@ -1086,31 +1092,41 @@ public:
                 AFL_ENSURE(false)("unknown message", ev->GetTypeRewrite());
             }
         } catch (const yexception& e) {
-            OnError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR, {});
+            ReplyErrorAndDie(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR, {});
         }
     }
 
-    //void SetOnRuntimeError(IKqpWriteBufferCallbacks* callbacks) override {
-    //    Callbacks = callbacks;
-    //}
-
-
     void Handle(TEvBufferWrite::TPtr& ev) {
-        TBufferWriteMessage message;
+        TWriteToken token;
+        if (!ev->Get()->Token) {
+            AFL_ENSURE(ev->Get()->Settings);
+            token = Open(std::move(*ev->Get()->Settings));
+        } else {
+            token = *ev->Get()->Token;
+        }
+        
+        auto& queue = DataQueues[token.TableId];
+        queue.emplace_back();
+        auto& message = queue.back();
+
+        message.Token = token;
         message.From = ev->Sender;
         message.Close = ev->Get()->Close;
         message.Data = ev->Get()->Data;
         message.Alloc = ev->Get()->Alloc;
 
-        if (!ev->Get()->Token) {
-            AFL_ENSURE(ev->Get()->Settings);
-            message.Token = Open(std::move(*ev->Get()->Settings));
+        if (HasWrites) {
+            AFL_ENSURE(LockTxId == ev->Get()->Settings->TransactionSettings.LockTxId);
+            AFL_ENSURE(LockNodeId == ev->Get()->Settings->TransactionSettings.LockNodeId);
+            AFL_ENSURE(InconsistentTx == ev->Get()->Settings->TransactionSettings.InconsistentTx);
         } else {
-            message.Token = *ev->Get()->Token;
+            LockTxId = ev->Get()->Settings->TransactionSettings.LockTxId;
+            LockNodeId = ev->Get()->Settings->TransactionSettings.LockNodeId;
+            InconsistentTx = ev->Get()->Settings->TransactionSettings.InconsistentTx;
+            HasWrites = true;
         }
-
-        DataQueues[message.Token.TableId].push_back(message);
-        ProcessQueue(message.Token.TableId);
+        
+        ProcessQueue(token.TableId);
     }
 
     void ProcessQueue(const TTableId& tableId) {
@@ -1157,10 +1173,9 @@ public:
                 this,
                 settings.TableId,
                 settings.TablePath,
-                Settings.TxId,
-                Settings.LockTxId,
-                Settings.LockNodeId,
-                Settings.InconsistentTx,
+                LockTxId,
+                LockNodeId,
+                InconsistentTx,
                 TypeEnv,
                 Alloc);
             info.WriteTableActorId = RegisterWithSameMailbox(info.WriteTableActor);
@@ -1221,7 +1236,7 @@ public:
         State = EState::PREPARING;
         OnPreparedCallback = std::move(callback);
         for (auto& [_, info] : WriteInfos) {
-            info.WriteTableActor->SetPrepare();
+            info.WriteTableActor->SetPrepare(prepareSettings.TxId);
         }
         Close();
         Process();
@@ -1236,20 +1251,15 @@ public:
         }
     }
 
-    void ImmediateCommit(std::function<void(ui64)> callback) override {
+    void ImmediateCommit(std::function<void(ui64)> callback, ui64 txId) override {
         YQL_ENSURE(State == EState::WRITING);
         State = EState::COMMITTING;
         OnCommitCallback = std::move(callback);
         for (auto& [_, info] : WriteInfos) {
-            info.WriteTableActor->SetImmediateCommit();
+            info.WriteTableActor->SetImmediateCommit(txId);
         }
         Close();
         Process();
-    }
-
-    void Rollback(std::function<void(ui64)> callback) override {
-        YQL_ENSURE(State == EState::WRITING);
-        Y_UNUSED(callback);
     }
 
     void Close() {
@@ -1399,16 +1409,24 @@ public:
     }
 
     void OnError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) override {
+        ReplyErrorAndDie(message, statusCode, subIssues);
+    }
+
+    void ReplyErrorAndDie(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues) {
         Y_DEBUG_ABORT_UNLESS(false);
         CA_LOG_E("Error: " << message << ". statusCode=" << statusCode << ". subIssues=" << subIssues.ToString());
         Y_UNUSED(message, statusCode, subIssues);
-        //Callbacks->OnRuntimeError(message, statusCode, subIssues);
     }
 
 private:
     TString LogPrefix;
 
     const TKqpBufferWriterSettings Settings;
+
+    bool HasWrites = false;
+    ui64 LockTxId = 0;
+    ui64 LockNodeId = 0;
+    bool InconsistentTx = false;
 
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
     NMiniKQL::TTypeEnvironment TypeEnv;
@@ -1426,7 +1444,6 @@ private:
     std::function<void()> OnFlushedCallback;
     std::function<void(TPreparedInfo&& preparedInfo)> OnPreparedCallback;
     std::function<void(ui64)> OnCommitCallback;
-    //IKqpWriteBufferCallbacks* Callbacks = nullptr;
 
     THashMap<TTableId, std::deque<TBufferWriteMessage>> DataQueues;
 
@@ -1513,6 +1530,12 @@ private:
                 .TablePath = Settings.GetTable().GetPath(),
                 .OperationType = GetOperation(Settings.GetType()),
                 .Columns = std::move(columnsMetadata),
+                .TransactionSettings = TTransactionSettings{
+                    .TxId = TxId,
+                    .LockTxId = Settings.GetLockTxId(),
+                    .LockNodeId = Settings.GetLockNodeId(),
+                    .InconsistentTx = Settings.GetInconsistentTx(),
+                },
             };
         }
 

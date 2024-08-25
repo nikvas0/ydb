@@ -5,23 +5,11 @@
 #include <ydb/core/scheme/scheme_types_proto.h>
 #include <ydb/core/tx/data_events/events.h>
 #include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io_factory.h>
+#include <ydb/core/kqp/common/buffer/events.h>
 
 namespace NKikimr {
 namespace NKqp {
 
-
-struct TPrepareSettings {
-    THashSet<ui64> SendingShards;
-    THashSet<ui64> ReceivingShards;
-    std::optional<ui64> ArbiterShard;
-};
-
-struct TPreparedInfo {
-    ui64 ShardId;
-    ui64 MinStep;
-    ui64 MaxStep;
-    TVector<ui64> Coordinators;
-};
 
 // TODO: move somewhere else
 class IKqpWriteBuffer {
@@ -34,8 +22,8 @@ public:
 
     virtual void Prepare(std::function<void(TPreparedInfo&&)> callback, TPrepareSettings&& prepareSettings) = 0;
     virtual void OnCommit(std::function<void(ui64)> callback) = 0;
-    virtual void ImmediateCommit(std::function<void(ui64)> callback) = 0;
-    virtual void Rollback(std::function<void(ui64)> callback) = 0;
+    virtual void ImmediateCommit(std::function<void(ui64)> callback, ui64 txId) = 0;
+    //virtual void Rollback(std::function<void(ui64)> callback) = 0;
 
     virtual THashSet<ui64> GetShardsIds() const = 0;
     virtual THashMap<ui64, NKikimrDataEvents::TLock> GetLocks() const = 0;
@@ -46,10 +34,7 @@ public:
 };
 
 struct TKqpBufferWriterSettings {
-    ui64 TxId = 0;
-    ui64 LockTxId = 0;
-    ui64 LockNodeId = 0;
-    bool InconsistentTx = false;
+    TActorId SessionActorId;
 };
 
 std::pair<IKqpWriteBuffer*, NActors::IActor*> CreateKqpBufferWriterActor(TKqpBufferWriterSettings&& settings);

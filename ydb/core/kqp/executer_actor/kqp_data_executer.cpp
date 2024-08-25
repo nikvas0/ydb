@@ -1884,7 +1884,7 @@ private:
                 //Counters->TxProxyMon->TxResultComplete->Inc();
 
                 CheckExecutionComplete();
-            });
+            }, TxId);
         }
     }
 
@@ -2015,15 +2015,6 @@ private:
         
         if (!BufferWriter) {
             TKqpBufferWriterSettings settings;
-            settings.TxId = TxId;
-            settings.InconsistentTx = false;
-            auto& lockTxId = TasksGraph.GetMeta().LockTxId;
-            if (lockTxId) {
-                settings.LockTxId = *lockTxId;
-                settings.LockNodeId = SelfId().NodeId();
-            }
-            Cerr << "Settings:: " << settings.TxId << " " <<settings.LockTxId << " " << settings.LockNodeId << Endl;
-            //settings.Callbacks = BufferWriterCallbacks.get();
             auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
             BufferWriter = writer;
             BufferWriterActor = actor;
@@ -2657,6 +2648,7 @@ private:
                 }
 
                 if (BufferWriter) {
+                    BufferWriterPrepareSettings.TxId = TxId;
                     BufferWriterPrepareSettings.SendingShards = THashSet<ui64>(sendingShardsSet.begin(), sendingShardsSet.end());
                     BufferWriterPrepareSettings.ReceivingShards = THashSet<ui64>(receivingShardsSet.begin(), receivingShardsSet.end());
                     if (arbiter) {
