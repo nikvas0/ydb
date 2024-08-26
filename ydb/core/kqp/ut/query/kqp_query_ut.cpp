@@ -1782,6 +1782,97 @@ Y_UNIT_TEST_SUITE(KqpQuery) {
             CompareYson(output, R"([[1u;[1];["test1"]];[100u;[100];["test2"]]])");
         }
     }
+
+    Y_UNIT_TEST(CopyToChunkedError) {
+        NKikimrConfig::TAppConfig appConfig;
+        auto settings = TKikimrSettings()
+            .SetAppConfig(appConfig)
+            .SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+        Tests::NCommon::TLoggerInit(kikimr).Initialize();
+
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+
+        const TString query = R"(
+            CREATE TABLE `/Root/DataShard` (
+                K Int32 NOT NULL,
+                S String,
+                S1 String,
+                S2 String,
+                S3 String,
+                S4 String,
+                PRIMARY KEY (K)
+            ) WITH (
+                AUTO_PARTITIONING_BY_SIZE = DISABLED,
+                AUTO_PARTITIONING_BY_LOAD = DISABLED,
+                AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1,
+                AUTO_PARTITIONING_MAX_PARTITIONS_COUNT = 1,
+                UNIFORM_PARTITIONS = 1);
+        )";
+
+        for (int t = 0; t < 1000; ++t) {
+            {
+                auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+                UNIT_ASSERT_C(result.GetStatus() == NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
+            }
+
+            {
+                auto builder = kikimr.GetTableClient().GetParamsBuilder();
+                auto& list = builder.AddParam("$rows").BeginList();
+
+                const size_t rowsCount = 10000;
+                const size_t valueSize = 1000;
+
+                for (size_t row = 0; row < rowsCount; ++row) {
+                    auto getString = []() -> TMaybe<TString> {
+                        size_t size = (RandomNumber<size_t>() % valueSize);
+                        if (size == 0) {
+                            return Nothing();
+                        }
+                        if (size == valueSize - 1) {
+                            return TString{};
+                        }
+                        return TString(size, 1);
+                    };
+                    list
+                        .AddListItem()
+                            .BeginStruct()
+                                .AddMember("K").Int32(row)
+                                .AddMember("S").OptionalString(getString())
+                                .AddMember("S1").OptionalString(getString())
+                                .AddMember("S2").OptionalString(getString())
+                                .AddMember("S3").OptionalString(getString())
+                                .AddMember("S4").OptionalString(getString())
+                            .EndStruct();
+                }
+                
+                list.EndList().Build();
+
+                auto prepareResult = session.ExecuteDataQuery(R"(
+                    DECLARE $rows AS 
+                        List<Struct<
+                            `K`:Int32,
+                            `S`:String?,
+                            `S1`:String?,
+                            `S2`:String?,
+                            `S3`:String?,
+                            `S4`:String?,
+                        >>;
+                    UPSERT INTO `/Root/DataShard` SELECT * FROM AS_TABLE($rows)
+                )", NYdb::NTable::TTxControl::BeginTx().CommitTx(), builder.Build()).ExtractValueSync();
+                UNIT_ASSERT_C(prepareResult.IsSuccess(), prepareResult.GetIssues().ToString());
+
+                if (!prepareResult.IsSuccess() && prepareResult.GetIssues().ToString().Contains("CopyToChunked")) {
+                    Cerr << "FOUND!!!" << Endl;
+                }
+            }
+
+            {
+                auto result = session.ExecuteSchemeQuery("DROP TABLE `/Root/DataShard`").GetValueSync();
+                UNIT_ASSERT_C(result.GetStatus() == NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
+            }
+        }
+    }
 }
 
 } // namespace NKqp

@@ -72,6 +72,7 @@ public:
     explicit TChunkedInputBuffer(TRope&& rope)
         : Rope_(std::move(rope))
     {
+        Cerr << "TChunkedInputBuffer INIT:: " << Rope_.size() << Endl;
         Next();
     }
 
@@ -80,6 +81,7 @@ public:
         , Data_(input.data())
         , Len_(input.size())
     {
+        Cerr << "TChunkedInputBuffer INIT2:: " << Rope_.size() << Endl;
     }
 
     inline const char* data() const {
@@ -110,6 +112,7 @@ public:
 
     inline void CopyTo(char* dst, size_t toCopy) {
         if (Y_LIKELY(toCopy <= size())) {
+            Cerr << "toCopy skip: " << toCopy << " " << size() << Endl;
             std::memcpy(dst, data(), toCopy);
             Skip(toCopy);
         } else {
@@ -132,6 +135,7 @@ public:
     void Next() {
         Y_DEBUG_ABORT_UNLESS(Len_ == 0);
         Rope_.EraseFront(OriginalLen_);
+        Cerr << "NEXT " << OriginalLen_ << " " << Len_ << Endl;
         if (!Rope_.IsEmpty()) {
             Len_ = OriginalLen_ = Rope_.begin().ContiguousSize();
             Data_ = Rope_.begin().ContiguousData();
@@ -146,12 +150,14 @@ private:
     void CopyToChunked(char* dst, size_t toCopy) {
         while (toCopy) {
             size_t chunkSize = std::min(size(), toCopy);
+            Cerr << "CopyToChunked " << chunkSize << " " << size() << Endl;
             std::memcpy(dst, data(), chunkSize);
             Skip(chunkSize);
             dst += chunkSize;
             toCopy -= chunkSize;
             if (toCopy) {
                 Next();
+                Cerr << "Check: " << size() << Endl;
                 MKQL_ENSURE(size(), "Unexpected end of buffer");
             }
         }

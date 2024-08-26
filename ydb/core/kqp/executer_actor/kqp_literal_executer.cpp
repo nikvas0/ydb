@@ -219,6 +219,7 @@ public:
                     auto& channelDesc = TasksGraph.GetChannel(outputChannelId);
                     NYql::NDq::TDqSerializedBatch outputData;
                     while (outputChannel->Pop(outputData)) {
+                        Cerr << "TDqSerializedBatch>> " << outputData.IsOOB() << " " << outputData.RowCount() << " " << outputData.Size() << Endl;
                         ResponseEv->TakeResult(channelDesc.DstInputIndex, std::move(outputData));
                         outputData = {};
                     }
