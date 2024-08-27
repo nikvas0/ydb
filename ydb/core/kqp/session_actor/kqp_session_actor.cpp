@@ -1288,9 +1288,8 @@ public:
                 .SessionActorId = SelfId(),
             };
             auto [writer, actor] = CreateKqpBufferWriterActor(std::move(settings));
-            RegisterWithSameMailbox(actor);
+            BufferActorId = RegisterWithSameMailbox(actor);
             BufferWriter = writer;
-            BufferActorId = writer->GetActorId();
         }
         auto executerActor = CreateKqpExecuter(std::move(request), Settings.Database,
             QueryState ? QueryState->UserToken : TIntrusiveConstPtr<NACLib::TUserToken>(),
