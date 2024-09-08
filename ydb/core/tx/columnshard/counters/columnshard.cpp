@@ -6,12 +6,10 @@
 
 namespace NKikimr::NColumnShard {
 
-TCSCounters::TCSCounters(std::shared_ptr<const TTabletCountersHandle> tabletCounters)
+TCSCounters::TCSCounters()
     : TBase("CS")
-    , TabletCounters(std::move(tabletCounters))
-    , Initialization(*this) {
-    Y_ABORT_UNLESS(TabletCounters);
-
+    , Initialization(*this)
+    , TxProgress(*this) {
     StartBackgroundCount = TBase::GetDeriviative("StartBackground/Count");
     TooEarlyBackgroundCount = TBase::GetDeriviative("TooEarlyBackground/Count");
     SetupCompactionCount = TBase::GetDeriviative("SetupCompaction/Count");
@@ -55,6 +53,7 @@ TCSCounters::TCSCounters(std::shared_ptr<const TTabletCountersHandle> tabletCoun
     HistogramSuccessWriteMiddle6PutBlobsDurationMs = TBase::GetHistogram("SuccessWriteMiddle6PutBlobsDurationMs", NMonitoring::ExponentialHistogram(18, 2, 5));
     HistogramFailedWritePutBlobsDurationMs = TBase::GetHistogram("FailedWritePutBlobsDurationMs", NMonitoring::ExponentialHistogram(18, 2, 5));
     HistogramWriteTxCompleteDurationMs = TBase::GetHistogram("WriteTxCompleteDurationMs", NMonitoring::ExponentialHistogram(18, 2, 5));
+
     WritePutBlobsCount = TBase::GetValue("WritePutBlobs");
     WriteRequests = TBase::GetValue("WriteRequests");
 

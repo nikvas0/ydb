@@ -433,6 +433,7 @@ std::shared_ptr<NKikimr::NOlap::IStoragesManager> CommonStoragesManager = Initia
 Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
     void WriteLoadRead(const std::vector<NArrow::NTest::TTestColumn>& ydbSchema,
                        const std::vector<NArrow::NTest::TTestColumn>& key) {
+        TTestBasicRuntime runtime;
         TTestDbWrapper db;
         TIndexInfo tableInfo = NColumnShard::BuildTableInfo(ydbSchema, key);
 
@@ -475,10 +476,10 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
         auto lastSchema = engine.GetVersionedIndex().GetLastSchema();
         UNIT_ASSERT_EQUAL(lastSchema->GetSnapshot(), indexSnaphot);
         const TIndexInfo& indexInfo = lastSchema->GetIndexInfo();
-        THashSet<ui32> oneColumnId = { indexInfo.GetColumnId(testColumns[0].GetName()) };
+        THashSet<ui32> oneColumnId = { indexInfo.GetColumnIdVerified(testColumns[0].GetName()) };
         THashSet<ui32> columnIds;
         for (auto& c : testColumns) {
-            columnIds.insert(indexInfo.GetColumnId(c.GetName()));
+            columnIds.insert(indexInfo.GetColumnIdVerified(c.GetName()));
         }
 
         { // select from snap before insert
@@ -528,6 +529,7 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
 
     void ReadWithPredicates(const std::vector<NArrow::NTest::TTestColumn>& ydbSchema,
                             const std::vector<NArrow::NTest::TTestColumn>& key) {
+        TTestBasicRuntime runtime;
         TTestDbWrapper db;
         TIndexInfo tableInfo = NColumnShard::BuildTableInfo(ydbSchema, key);
 
@@ -573,7 +575,7 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
         planStep = 3;
 
         const TIndexInfo& indexInfo = engine.GetVersionedIndex().GetLastSchema()->GetIndexInfo();
-        THashSet<ui32> oneColumnId = { indexInfo.GetColumnId(key[0].GetName()) };
+        THashSet<ui32> oneColumnId = { indexInfo.GetColumnIdVerified(key[0].GetName()) };
 
         { // full scan
             ui64 txId = 1;
@@ -590,7 +592,7 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
                 gt10k = MakeStrPredicate("10000", NArrow::EOperation::Greater);
             }
             NOlap::TPKRangesFilter pkFilter(false);
-            Y_ABORT_UNLESS(pkFilter.Add(gt10k, nullptr, &indexInfo));
+            Y_ABORT_UNLESS(pkFilter.Add(gt10k, nullptr, indexInfo.GetReplaceKey()));
             auto selectInfo = engine.Select(pathId, TSnapshot(planStep, txId), pkFilter);
             UNIT_ASSERT_VALUES_EQUAL(selectInfo->PortionsOrderedPK.size(), 10);
         }
@@ -602,7 +604,7 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
                 lt10k = MakeStrPredicate("08999", NArrow::EOperation::Less);
             }
             NOlap::TPKRangesFilter pkFilter(false);
-            Y_ABORT_UNLESS(pkFilter.Add(nullptr, lt10k, &indexInfo));
+            Y_ABORT_UNLESS(pkFilter.Add(nullptr, lt10k, indexInfo.GetReplaceKey()));
             auto selectInfo = engine.Select(pathId, TSnapshot(planStep, txId), pkFilter);
             UNIT_ASSERT_VALUES_EQUAL(selectInfo->PortionsOrderedPK.size(), 9);
         }
@@ -624,6 +626,7 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
     }
 
     Y_UNIT_TEST(IndexWriteOverload) {
+        TTestBasicRuntime runtime;
         TTestDbWrapper db;
         auto csDefaultControllerGuard = NKikimr::NYDBTest::TControllers::RegisterCSControllerGuard<TDefaultTestsController>();
         TIndexInfo tableInfo = NColumnShard::BuildTableInfo(testColumns, testKey);;
@@ -696,10 +699,11 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
     }
 
     Y_UNIT_TEST(IndexTtl) {
+        TTestBasicRuntime runtime;
         TTestDbWrapper db;
         TIndexInfo tableInfo = NColumnShard::BuildTableInfo(testColumns, testKey);
         auto csDefaultControllerGuard = NKikimr::NYDBTest::TControllers::RegisterCSControllerGuard<TDefaultTestsController>();
-        csDefaultControllerGuard->SetTasksActualizationLag(TDuration::Zero());
+        csDefaultControllerGuard->SetOverrideTasksActualizationLag(TDuration::Zero());
 
         ui64 pathId = 1;
         ui32 step = 1000;
@@ -750,7 +754,7 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
             planStep = 3;
 
             const TIndexInfo& indexInfo = engine.GetVersionedIndex().GetLastSchema()->GetIndexInfo();
-            THashSet<ui32> oneColumnId = {indexInfo.GetColumnId(testColumns[0].GetName())};
+            THashSet<ui32> oneColumnId = {indexInfo.GetColumnIdVerified(testColumns[0].GetName())};
 
             { // full scan
                 ui64 txId = 1;
@@ -790,7 +794,7 @@ Y_UNIT_TEST_SUITE(TColumnEngineTestLogs) {
             engine.Load(db);
 
             const TIndexInfo& indexInfo = engine.GetVersionedIndex().GetLastSchema()->GetIndexInfo();
-            THashSet<ui32> oneColumnId = {indexInfo.GetColumnId(testColumns[0].GetName())};
+            THashSet<ui32> oneColumnId = { indexInfo.GetColumnIdVerified(testColumns[0].GetName()) };
 
             { // full scan
                 ui64 txId = 1;
