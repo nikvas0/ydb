@@ -340,7 +340,7 @@ public:
                 << "Too many table resolve attempts for table " << TableId << ".");
             RuntimeError(
                 TStringBuilder()
-                << "Too many table resolve attempts for table `" << Settings.GetTable().GetPath() << "`.",
+                << "Too many table resolve attempts for table `" << TablePath << "`.",
                 NYql::NDqProto::StatusIds::SCHEME_ERROR);
             return;
         }
