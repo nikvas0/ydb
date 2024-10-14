@@ -1340,6 +1340,92 @@ Y_UNIT_TEST_SUITE(KqpQuery) {
         }
     }
 
+    Y_UNIT_TEST(OlapCreateAsSelect_TpcH_LineItem) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableOlapSink(true);
+        appConfig.MutableTableServiceConfig()->SetEnablePreparedDdl(true);
+        appConfig.MutableTableServiceConfig()->SetEnableCreateTableAs(true);
+        appConfig.MutableTableServiceConfig()->SetEnablePerStatementQueryExecution(true);
+        auto settings = TKikimrSettings()
+            .SetAppConfig(appConfig)
+            .SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+
+        const TString query = R"(
+            CREATE TABLE `/Root/Source` (
+                l_comment Utf8 NOT NULL,
+                l_commitdate Date32 NOT NULL,
+                l_discount Double NOT NULL,
+                l_extendedprice Double NOT NULL,
+                l_linenumber Int32 NOT NULL,
+                l_linestatus Utf8 NOT NULL,
+                l_orderkey Int64 NOT NULL,
+                l_partkey Int64 NOT NULL,
+                l_quantity Double NOT NULL,
+                l_receiptdate Date32 NOT NULL,
+                l_returnflag Utf8 NOT NULL,
+                l_shipdate Date32 NOT NULL,
+                l_shipinstruct Utf8 NOT NULL,
+                l_shipmode Utf8 NOT NULL,
+                l_suppkey Int64 NOT NULL,
+                l_tax Double NOT NULL,
+                PRIMARY KEY (l_linenumber, l_orderkey)
+            )
+            PARTITION BY HASH(l_orderkey)
+            WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 10);
+        )";
+
+        Tests::NCommon::TLoggerInit(kikimr).SetComponents({ NKikimrServices::TX_COLUMNSHARD }, "CS").Initialize();
+
+        auto client = kikimr.GetQueryClient();
+        auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+        UNIT_ASSERT_C(result.GetStatus() == NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
+
+        {
+            auto prepareResult = client.ExecuteQuery(R"(
+                REPLACE INTO `/Root/Source` (
+                    l_comment,
+                    l_commitdate,
+                    l_discount,
+                    l_extendedprice,
+                    l_linenumber,
+                    l_linestatus,
+                    l_orderkey,
+                    l_partkey,
+                    l_quantity,
+                    l_receiptdate,
+                    l_returnflag,
+                    l_shipdate,
+                    l_shipinstruct,
+                    l_shipmode,
+                    l_suppkey,
+                    l_tax) VALUES
+                    ('test', Date32('1970-01-03'), 0, 0, 0, 'test', 0, 0, 0, Date32('1970-01-03'), 'test', Date32('1970-01-03'), 'test', 'test', 0, 0);
+            )", NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+            UNIT_ASSERT_C(prepareResult.IsSuccess(), prepareResult.GetIssues().ToString());
+        }
+
+        {
+            auto prepareResult = client.ExecuteQuery(R"(
+                CREATE TABLE `/Root/Destination` (
+                    PRIMARY KEY (l_linenumber, l_orderkey)
+                )
+                PARTITION BY HASH(l_orderkey)
+                WITH (
+                    STORE=COLUMN,
+                    AUTO_PARTITIONING_MIN_PARTITIONS_COUNT=65,
+                    AUTO_PARTITIONING_MAX_PARTITIONS_COUNT=65
+                )
+                AS SELECT * FROM `/Root/Source`;
+
+            )", NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+            UNIT_ASSERT(!prepareResult.IsSuccess());
+            UNIT_ASSERT_C(
+                prepareResult.GetIssues().ToString().Contains("CTAS statement can be executed only in NoTx mode."),
+                prepareResult.GetIssues().ToString());
+        }
+    }
+
     Y_UNIT_TEST(OlapCreateAsSelect_Simple) {
         NKikimrConfig::TAppConfig appConfig;
         appConfig.MutableTableServiceConfig()->SetEnableOlapSink(true);

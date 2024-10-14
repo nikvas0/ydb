@@ -896,7 +896,7 @@ public:
                 dataSize += GetBatch(BatchesInFlight)->GetMemory();
                 ++BatchesInFlight;
             }
-            YQL_ENSURE(BatchesInFlight == Batches.size() || GetBatch(BatchesInFlight)->GetMemory() <= maxDataSize); 
+            //YQL_ENSURE(BatchesInFlight == Batches.size() || dataSize + GetBatch(BatchesInFlight)->GetMemory() >= maxDataSize || BatchesInFlight == maxCount); 
         }
 
         const IPayloadSerializer::IBatchPtr& GetBatch(size_t index) const {

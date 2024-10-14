@@ -239,7 +239,7 @@ Y_UNIT_TEST_SUITE(KqpOlapWrite) {
             }
             AFL_VERIFY(!Singleton<NWrappers::NExternalStorage::TFakeExternalStorage>()->GetSize());
         }
-    }
+    }    
 }
 
 }   // namespace NKikimr::NKqp
