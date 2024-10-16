@@ -303,6 +303,7 @@ public:
     std::pair<bool, TIssues> ApplyTableOperations(const IterableKqpTableOps& operations,
         const IterableKqpTableInfos& tableInfos, EKikimrQueryType queryType)
     {
+        HasUncommittedChangesRead = false;
         TIssues issues;
         if (IsClosed()) {
             TString message = TStringBuilder() << "Cannot perform operations on closed transaction.";
