@@ -12,6 +12,7 @@ enum class ECompileActorAction {
     COMPILE,
     PARSE,
     SPLIT,
+    SPLIT_EXPLAIN,
 };
 
 IActor* CreateKqpCompileService(const NKikimrConfig::TTableServiceConfig& tableServiceConfig,

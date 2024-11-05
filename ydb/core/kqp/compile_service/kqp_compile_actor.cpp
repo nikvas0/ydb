@@ -110,7 +110,10 @@ public:
                 StartCompilation(ctx);
                 break;
             case ECompileActorAction::SPLIT:
-                StartSplitting(ctx);
+                StartSplitting(ctx, false);
+                break;
+            case ECompileActorAction::SPLIT_EXPLAIN:
+                StartSplitting(ctx, true);
                 break;
         }
     }
@@ -173,9 +176,9 @@ private:
         PassAway();
     }
 
-    void StartSplitting(const TActorContext &ctx) {
+    void StartSplitting(const TActorContext &ctx, const bool isExplain) {
         const auto prepareSettings = PrepareCompilationSettings(ctx);
-        auto result = KqpHost->SplitQuery(QueryRef, prepareSettings);
+        auto result = KqpHost->SplitQuery(QueryRef, prepareSettings, isExplain);
 
         Become(&TKqpCompileActor::CompileState);
         ReplySplitResult(ctx, std::move(result));
@@ -226,6 +229,7 @@ private:
                 break;
 
             case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY:
+                Cerr << "START COMPILATION" << Endl;
                 prepareSettings.ConcurrentResults = false;
                 AsyncCompileResult = KqpHost->PrepareGenericQuery(QueryRef, prepareSettings, SplitExpr);
                 break;

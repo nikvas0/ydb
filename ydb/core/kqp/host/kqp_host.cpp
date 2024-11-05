@@ -1221,8 +1221,10 @@ public:
 
 private:
     TCompileExprResult CompileQuery(const TKqpQueryRef& query, bool isSql, TExprContext& ctx, TMaybe<TSqlVersion>& sqlVersion,
-        TKqpTranslationSettingsBuilder& settingsBuilder) const
+        TKqpTranslationSettingsBuilder& settingsBuilder, bool isExplain) const
     {
+
+        YQL_CLOG(INFO, ProviderKqp) << "CompileQuery BEFORE  " << isExplain;
         TCompileExprResult result;
         std::shared_ptr<NYql::TAstParseResult> queryAst;
         if (!query.AstResult) {
@@ -1266,6 +1268,8 @@ private:
             return result;
         }
 
+        YQL_CLOG(INFO, ProviderKqp) << "CompileQuery BEFORE  " << isExplain;
+
         YQL_ENSURE(queryAst->Root);
         TExprNode::TPtr queryExpr;
         if (!CompileExpr(*queryAst->Root, queryExpr, ctx, ModuleResolver.get(), nullptr)) {
@@ -1274,8 +1278,15 @@ private:
 
         YQL_CLOG(INFO, ProviderKqp) << "Compiled query:\n" << KqpExprToPrettyString(*queryExpr, ctx);
 
+        YQL_CLOG(INFO, ProviderKqp) << "REWRITE QUERY  " << isExplain;
         if (Config->EnableCreateTableAs) {
-            auto [rewriteResults, rewriteIssues] = RewriteExpression(queryExpr, ctx, *TypesCtx, SessionCtx, Cluster);
+            auto [rewriteResults, rewriteIssues] = RewriteExpression(
+                queryExpr,
+                ctx,
+                *TypesCtx,
+                SessionCtx,
+                Cluster,
+                isExplain);
             ctx.IssueManager.AddIssues(rewriteIssues);
             if (!rewriteIssues.Empty()) {
                 return result;
@@ -1293,7 +1304,7 @@ private:
         return result;
     }
 
-    TSplitResult SplitQuery(const TKqpQueryRef& query, const TPrepareSettings& settings) override {
+    TSplitResult SplitQuery(const TKqpQueryRef& query, const TPrepareSettings& settings, const bool isExplain) override {
         SetupYqlTransformer(EKikimrQueryType::Query);
         auto sqlVersion = SetupQueryParameters(settings, EKikimrQueryType::Query);
 
@@ -1302,7 +1313,13 @@ private:
             .SetSqlAutoCommit(false)
             .SetUsePgParser(settings.UsePgParser)
             .SetIsEnableAntlr4Parser(SessionCtx->Config().EnableAntlr4Parser);
-        auto compileResult = CompileYqlQuery(query, /* isSql */ true, *ExprCtx, sqlVersion, settingsBuilder);
+        Cerr << "IN SPLIT START " << Endl;
+        auto compileResult = CompileYqlQuery(query, /* isSql */ true, *ExprCtx, sqlVersion, settingsBuilder, isExplain);
+        Cerr << "IN SPLIT FINISH " << compileResult.QueryExprs.size() << Endl;
+
+        for (const auto& resultPart : compileResult.QueryExprs) {
+            Cerr << "Splitted query part:\n" << KqpExprToPrettyString(*resultPart, *ExprCtx) << Endl;
+        }
 
         return TSplitResult{
             .Ctx = std::move(ExprCtxStorage),
@@ -1312,9 +1329,9 @@ private:
     }
 
     TCompileExprResult CompileYqlQuery(const TKqpQueryRef& query, bool isSql, TExprContext& ctx, TMaybe<TSqlVersion>& sqlVersion,
-        TKqpTranslationSettingsBuilder& settingsBuilder) const
+        TKqpTranslationSettingsBuilder& settingsBuilder, bool isExplain = false) const
     {
-        auto compileResult = CompileQuery(query, isSql, ctx, sqlVersion, settingsBuilder);
+        auto compileResult = CompileQuery(query, isSql, ctx, sqlVersion, settingsBuilder, isExplain);
         if (!compileResult.QueryExprs) {
             return compileResult;
         }
@@ -1328,7 +1345,7 @@ private:
             return compileResult;
         }
 
-        if (TMaybeNode<TCoCommit>(compileResult.QueryExprs.front()) && TCoCommit(compileResult.QueryExprs.front()).DataSink().Maybe<TKiDataSink>()) {
+        if (isExplain || (TMaybeNode<TCoCommit>(compileResult.QueryExprs.front()) && TCoCommit(compileResult.QueryExprs.front()).DataSink().Maybe<TKiDataSink>())) {
             return compileResult;
         }
 
@@ -1530,6 +1547,7 @@ private:
         auto sqlVersion = SetupQueryParameters(settings, queryType);
 
         if (!expr) {
+            Cerr << "PrepareQueryInternal : no expr" << Endl;
             TKqpTranslationSettingsBuilder settingsBuilder(SessionCtx->Query().Type, SessionCtx->Config()._KqpYqlSyntaxVersion.Get().GetRef(), Cluster, query.Text, SessionCtx->Config().BindingsMode, GUCSettings);
             settingsBuilder.SetSqlAutoCommit(false)
                 .SetUsePgParser(settings.UsePgParser)
@@ -1540,12 +1558,15 @@ private:
             }
 
             if (compileResult.QueryExprs.size() > 1) {
+                Cerr << "NEED SPLIT HERE " << compileResult.QueryExprs.size() << Endl;
                 return MakeIntrusive<TAsyncPrepareNeedToSplitYqlResult>();
             } else {
+                Cerr << "PREPARE" << Endl;
                 return MakeIntrusive<TAsyncPrepareYqlResult>(compileResult.QueryExprs.front().Get(), ctx, *YqlTransformer, SessionCtx->QueryPtr(),
                     query.Text, sqlVersion, TransformCtx, compileResult.KeepInCache, compileResult.CommandTagName, DataProvidersFinalizer);
             }
         } else {
+            Cerr << "PrepareQueryInternal : has expr" << Endl;
             return MakeIntrusive<TAsyncPrepareYqlResult>(expr, ctx, *YqlTransformer, SessionCtx->QueryPtr(),
                 query.Text, sqlVersion, TransformCtx, false, Nothing(), DataProvidersFinalizer);
         }

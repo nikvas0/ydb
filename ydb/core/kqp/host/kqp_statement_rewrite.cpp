@@ -40,7 +40,8 @@ namespace {
             NYql::TExprContext& exprCtx,
             NYql::TTypeAnnotationContext& typeCtx,
             const TIntrusivePtr<NYql::TKikimrSessionContext>& sessionCtx,
-            const TString& cluster) {
+            const TString& cluster,
+            const bool isExplain) {
         NYql::NNodes::TExprBase expr(root);
         auto maybeWrite = expr.Maybe<NYql::NNodes::TCoWrite>();
         if (!maybeWrite) {
@@ -217,6 +218,12 @@ namespace {
             exprCtx.NewList(pos, {
                 exprCtx.NewAtom(pos, "AllowInconsistentWrites"),
             }));
+        /*if (isExplain) {
+            insertSettings.push_back(
+                exprCtx.NewList(pos, {
+                    exprCtx.NewAtom(pos, "notable"),
+                }));
+        }*/
 
         const auto insert = exprCtx.NewCallable(pos, "Write!", {
             topLevelRead == nullptr ? exprCtx.NewWorld(pos) : exprCtx.NewCallable(pos, "Left!", {topLevelRead.Get()}),
@@ -237,52 +244,103 @@ namespace {
         });
 
         TCreateTableAsResult result;
-        result.CreateTable = create;
-        result.ReplaceInto = exprCtx.NewCallable(pos, "Commit!", {
-            insert,
-            exprCtx.NewCallable(pos, "DataSink", {
-                exprCtx.NewAtom(pos, "kikimr"),
-                exprCtx.NewAtom(pos, "db"),
-            }),
-            exprCtx.NewList(pos, {
-                exprCtx.NewList(pos, {
-                    exprCtx.NewAtom(pos, "mode"),
-                    exprCtx.NewAtom(pos, "flush"),
-                }),
-            }),
-        });
-
-        if (isAtomicOperation) {
-            result.MoveTable = exprCtx.NewCallable(pos, "Write!", {
-                exprCtx.NewWorld(pos),
+        if (!isExplain) {
+            result.CreateTable = create;
+            result.ReplaceInto = exprCtx.NewCallable(pos, "Commit!", {
+                insert,
                 exprCtx.NewCallable(pos, "DataSink", {
                     exprCtx.NewAtom(pos, "kikimr"),
                     exprCtx.NewAtom(pos, "db"),
                 }),
-                exprCtx.NewCallable(pos, "Key", {
-                    exprCtx.NewList(pos, {
-                        exprCtx.NewAtom(pos, "tablescheme"),
-                        exprCtx.NewCallable(pos, "String", {
-                            exprCtx.NewAtom(pos, createTableName),
-                        }),
-                    }),
-                }),
-                exprCtx.NewCallable(pos, "Void", {}),
                 exprCtx.NewList(pos, {
                     exprCtx.NewList(pos, {
                         exprCtx.NewAtom(pos, "mode"),
-                        exprCtx.NewAtom(pos, "alter"),
+                        exprCtx.NewAtom(pos, "flush"),
                     }),
-                    exprCtx.NewList(pos, {
-                        exprCtx.NewAtom(pos, "actions"),
+                }),
+            });
+
+            if (isAtomicOperation) {
+                result.MoveTable = exprCtx.NewCallable(pos, "Write!", {
+                    exprCtx.NewWorld(pos),
+                    exprCtx.NewCallable(pos, "DataSink", {
+                        exprCtx.NewAtom(pos, "kikimr"),
+                        exprCtx.NewAtom(pos, "db"),
+                    }),
+                    exprCtx.NewCallable(pos, "Key", {
                         exprCtx.NewList(pos, {
-                            exprCtx.NewList(pos, {
-                                exprCtx.NewAtom(pos, "renameTo"),
-                                exprCtx.NewAtom(pos, tableName),
+                            exprCtx.NewAtom(pos, "tablescheme"),
+                            exprCtx.NewCallable(pos, "String", {
+                                exprCtx.NewAtom(pos, createTableName),
                             }),
                         }),
                     }),
+                    exprCtx.NewCallable(pos, "Void", {}),
+                    exprCtx.NewList(pos, {
+                        exprCtx.NewList(pos, {
+                            exprCtx.NewAtom(pos, "mode"),
+                            exprCtx.NewAtom(pos, "alter"),
+                        }),
+                        exprCtx.NewList(pos, {
+                            exprCtx.NewAtom(pos, "actions"),
+                            exprCtx.NewList(pos, {
+                                exprCtx.NewList(pos, {
+                                    exprCtx.NewAtom(pos, "renameTo"),
+                                    exprCtx.NewAtom(pos, tableName),
+                                }),
+                            }),
+                        }),
+                    }),
+                });
+            }
+        } else {
+            /*result.ReplaceInto = exprCtx.NewCallable(pos, "Commit!", {
+                insert,
+                exprCtx.NewCallable(pos, "DataSink", {
+                    exprCtx.NewAtom(pos, "kikimr"),
+                    exprCtx.NewAtom(pos, "db"),
                 }),
+                exprCtx.NewList(pos, {
+                    exprCtx.NewList(pos, {
+                        exprCtx.NewAtom(pos, "mode"),
+                        exprCtx.NewAtom(pos, "flush"),
+                    }),
+                }),
+            });*/
+            const auto dataSink = exprCtx.NewCallable(pos, "DataSink", {
+                exprCtx.NewAtom(pos, "result"),
+                //exprCtx.NewAtom(pos, "db"),
+            });
+
+            NYql::TExprNode::TListType insertSettings;
+            insertSettings.push_back(
+                exprCtx.NewList(pos, {
+                    exprCtx.NewAtom(pos, "type"),
+                    //exprCtx.NewAtom(pos, "autoref"),
+                }));
+            insertSettings.push_back(
+                exprCtx.NewList(pos, {
+                    //exprCtx.NewAtom(pos, "type"),
+                    exprCtx.NewAtom(pos, "autoref"),
+                }));
+            const auto insert = exprCtx.NewCallable(pos, "Write!", {
+                topLevelRead == nullptr ? exprCtx.NewWorld(pos) : exprCtx.NewCallable(pos, "Left!", {topLevelRead.Get()}),
+                dataSink,
+                exprCtx.NewCallable(pos, "Key", {
+                        //exprCtx.NewList(pos, {
+                        //    exprCtx.NewAtom(pos, "tablescheme"),
+                        //    exprCtx.NewCallable(pos, "String", {
+                        //        exprCtx.NewAtom(pos, createTableName),
+                        //    }),
+                        //}),
+                    }),
+                insertData.Ptr(),
+                exprCtx.NewList(pos,std::move(insertSettings)),
+            });
+
+            result.ReplaceInto = exprCtx.NewCallable(pos, "Commit!", {
+                insert,
+                dataSink,
             });
         }
 
@@ -295,7 +353,8 @@ std::pair<TVector<NYql::TExprNode::TPtr>, NYql::TIssues> RewriteExpression(
         NYql::TExprContext& exprCtx,
         NYql::TTypeAnnotationContext& typeCtx,
         const TIntrusivePtr<NYql::TKikimrSessionContext>& sessionCtx,
-        const TString& cluster) {
+        const TString& cluster,
+        const bool isExplain) {
     NYql::TIssues issues;
     // CREATE TABLE AS statement can be used only with perstatement execution.
     // Thus we assume that there is only one such statement.
@@ -304,12 +363,15 @@ std::pair<TVector<NYql::TExprNode::TPtr>, NYql::TIssues> RewriteExpression(
     VisitExpr(root, [&](const NYql::TExprNode::TPtr& node) {
         if (NYql::NNodes::TCoWrite::Match(node.Get())) {
             ++actionsCount;
-            const auto rewriteResult = RewriteCreateTableAs(node, exprCtx, typeCtx, sessionCtx, cluster);
+            const auto rewriteResult = RewriteCreateTableAs(
+                node, exprCtx, typeCtx, sessionCtx, cluster, isExplain);
             if (rewriteResult) {
                 if (!result.empty()) {
                     issues.AddIssue("Several CTAS statement can't be used without per-statement mode.");
                 }
-                result.push_back(rewriteResult->CreateTable);
+                if (rewriteResult->CreateTable) {
+                    result.push_back(rewriteResult->CreateTable);
+                }
                 result.push_back(rewriteResult->ReplaceInto);
                 if (rewriteResult->MoveTable) {
                     result.push_back(rewriteResult->MoveTable);

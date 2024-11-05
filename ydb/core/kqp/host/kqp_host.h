@@ -113,7 +113,7 @@ public:
         NYql::TExprNode::TPtr World;
     };
 
-    virtual TSplitResult SplitQuery(const TKqpQueryRef& query, const TPrepareSettings& settings) = 0;
+    virtual TSplitResult SplitQuery(const TKqpQueryRef& query, const TPrepareSettings& settings, const bool isExplain) = 0;
 };
 
 TIntrusivePtr<IKqpHost> CreateKqpHost(TIntrusivePtr<IKqpGateway> gateway,

@@ -153,6 +153,8 @@ const TKikimrTableDescription* TKikimrTablesData::EnsureTableExists(const TStrin
         return desc;
     }
 
+    Y_ABORT_UNLESS(false);
+
     ctx.AddError(YqlIssue(ctx.GetPosition(pos), TIssuesIds::KIKIMR_SCHEME_ERROR, TStringBuilder()
         << "Cannot find table '" << NCommon::FullTableName(cluster, tablePath)
         << "' because it does not exist or you do not have access permissions."
@@ -197,6 +199,7 @@ TKikimrTableDescription& TKikimrTablesData::GetTable(const TString& cluster, con
     }
 
     auto desc = Tables.FindPtr(std::make_pair(cluster, tablePath));
+    Y_ABORT_UNLESS(desc);
     YQL_ENSURE(desc, "Unexpected empty metadata, cluster '" << cluster << "', table '" << table << "'");
 
     return *desc;
@@ -215,6 +218,7 @@ const TKikimrTableDescription& TKikimrTablesData::ExistingTable(const TStringBuf
     }
 
     auto desc = Tables.FindPtr(std::make_pair(TString(cluster), TString(tablePath)));
+    Y_ABORT_UNLESS(desc);
     YQL_ENSURE(desc);
     YQL_ENSURE(desc->DoesExist());
 

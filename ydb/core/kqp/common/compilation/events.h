@@ -69,6 +69,7 @@ struct TEvCompileRequest: public TEventLocal<TEvCompileRequest, TKqpEvents::EvCo
 
     TMaybe<TQueryAst> QueryAst;
     bool Split = false;
+    bool IsSplitExplain = false;
 
     NYql::TExprContext* SplitCtx = nullptr;
     NYql::TExprNode::TPtr SplitExpr = nullptr;
@@ -120,6 +121,7 @@ struct TEvRecompileRequest: public TEventLocal<TEvRecompileRequest, TKqpEvents::
 
     TMaybe<TQueryAst> QueryAst;
     bool Split = false;
+    bool IsSplitExplain = false;
 
     NYql::TExprContext* SplitCtx = nullptr;
     NYql::TExprNode::TPtr SplitExpr = nullptr;

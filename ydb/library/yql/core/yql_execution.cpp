@@ -743,18 +743,24 @@ IGraphTransformer::TStatus ValidateCallable(const TExprNode::TPtr& node, TExprCo
 
     IDataProvider* dataProvider = nullptr;
     for (auto& x : types.DataSources) {
+        Cerr << "CHECK " << node->Content() << Endl;
         if (x->CanExecute(*node)) {
+            Cerr << "OK " << Endl;
             dataProvider = x.Get();
             break;
         }
+        Cerr << "FAILED " << Endl;
     }
 
     if (!dataProvider) {
         for (auto& x : types.DataSinks) {
+            Cerr << "CHECK SINK " << node->Content() << Endl;
             if (x->CanExecute(*node)) {
+                Cerr << "OK " << Endl;
                 dataProvider = x.Get();
                 break;
             }
+            Cerr << "FAILED " << Endl;
         }
     }
 

@@ -281,9 +281,10 @@ std::unique_ptr<TEvKqp::TEvRecompileRequest> TKqpQueryState::BuildReCompileReque
         CompileResult->QueryAst);
 }
 
-std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildSplitRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr) {
+std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildSplitRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr, const bool isExplain) {
     auto request = BuildCompileRequest(cookie, gUCSettingsPtr);
     request->Split = true;
+    request->IsSplitExplain = isExplain;
     return request;
 }
 
@@ -298,6 +299,7 @@ std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildCompileSplittedR
     TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
 
     switch (GetAction()) {
+        case NKikimrKqp::QUERY_ACTION_EXPLAIN:
         case NKikimrKqp::QUERY_ACTION_EXECUTE:
             query = TKqpQueryId(Cluster, Database, UserRequestContext->DatabaseId, GetQuery(), settings, GetQueryParameterTypes(), gUCSettings);
             break;
@@ -341,6 +343,7 @@ bool TKqpQueryState::PrepareNextStatementPart() {
     ReplayMessage = {};
 
     if (ProcessingLastStatementPart()) {
+        Cerr << "LAST" << Endl;
         SplittedWorld.Reset();
         SplittedExprs.clear();
         SplittedCtx.Reset();
@@ -349,6 +352,7 @@ bool TKqpQueryState::PrepareNextStatementPart() {
     }
 
     ++NextSplittedExpr;
+    Cerr << "HERE " << NextSplittedExpr << Endl;
     return true;
 }
 

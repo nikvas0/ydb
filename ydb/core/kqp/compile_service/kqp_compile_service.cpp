@@ -629,6 +629,7 @@ private:
             << ", queryText: \"" << (request.Query ? EscapeC(request.Query->Text) : "<empty>") << "\""
             << ", keepInCache: " << request.KeepInCache
             << ", split: " << request.Split
+            << ", isExplain: " << request.IsSplitExplain
             << *request.UserRequestContext);
 
         *Counters->CompileQueryCacheSize = QueryCache.Size();
@@ -715,7 +716,9 @@ private:
             request.PerStatementResult,
             request.Deadline,
             ev->Get()->Split
-                ? ECompileActorAction::SPLIT
+                ? (ev->Get()->IsSplitExplain
+                    ? ECompileActorAction::SPLIT_EXPLAIN
+                    : ECompileActorAction::SPLIT)
                 : (TableServiceConfig.GetEnableAstCache() && !request.QueryAst)
                     ? ECompileActorAction::PARSE
                     : ECompileActorAction::COMPILE);
@@ -783,7 +786,9 @@ private:
                 false,
                 request.Deadline,
                 ev->Get()->Split
-                    ? ECompileActorAction::SPLIT
+                    ? (ev->Get()->IsSplitExplain
+                        ? ECompileActorAction::SPLIT_EXPLAIN
+                        : ECompileActorAction::SPLIT)
                     : (TableServiceConfig.GetEnableAstCache() && !request.QueryAst)
                         ? ECompileActorAction::PARSE
                         : ECompileActorAction::COMPILE);

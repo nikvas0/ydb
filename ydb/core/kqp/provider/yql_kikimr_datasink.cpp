@@ -21,6 +21,7 @@ public:
 private:
     TStatus HandleWriteTable(TKiWriteTable node, TExprContext& ctx) override {
         Y_UNUSED(ctx);
+        Cerr << "HandleWriteTable " << NCommon::ExprToPrettyString(ctx, *node.Ptr()) << Endl;
 
         auto cluster = node.DataSink().Cluster();
         auto table = node.Table();

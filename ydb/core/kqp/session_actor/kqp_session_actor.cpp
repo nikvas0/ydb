@@ -570,11 +570,12 @@ public:
         // is success.
         if (!QueryState->SaveAndCheckCompileResult(ev->Get())) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
-
             if (QueryState->CompileResult->NeedToSplit) {
                 if (!QueryState->HasTxControl()) {
-                    YQL_ENSURE(QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXECUTE);
-                    auto ev = QueryState->BuildSplitRequest(CompilationCookie, GUCSettings);
+                    const bool isExplain = (QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXPLAIN);
+                    YQL_ENSURE(isExplain || QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXECUTE);
+
+                    auto ev = QueryState->BuildSplitRequest(CompilationCookie, GUCSettings, isExplain);
                     Send(MakeKqpCompileServiceID(SelfId().NodeId()), ev.release(), 0, QueryState->QueryId,
                         QueryState->KqpSessionSpan.GetTraceId());
                 } else {
@@ -630,7 +631,20 @@ public:
     }
 
     void OnSuccessSplitRequest() {
-        YQL_ENSURE(ExecuteNextStatementPart());
+        //if (QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXPLAIN)
+        //{
+        //    Cerr << "OnSuccessSplitRequest::EXPLAIN " << Endl;// << QueryState->CompileResult->PreparedQuery->GetPhysicalQuery().GetQueryAst() << Endl;
+        //    return ReplyPrepareResult();
+        //}
+        //Cerr << "OnSuccessSplitRequest >> " << QueryState->GetAction() << Endl;
+
+        if (QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXPLAIN) {
+            YQL_ENSURE(ExecuteNextStatementPart());
+            return;
+        } else {
+            YQL_ENSURE(QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXECUTE);
+            YQL_ENSURE(ExecuteNextStatementPart());
+        }
     }
 
     bool ExecuteNextStatementPart() {
@@ -645,12 +659,15 @@ public:
         if (QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_PREPARE ||
             QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_EXPLAIN)
         {
+            Cerr << "EXPLAIN " << QueryState->CompileResult->PreparedQuery->GetPhysicalQuery().GetQueryAst() << Endl;
             return ReplyPrepareResult();
         }
 
         if (!PrepareQueryContext()) {
             return;
         }
+
+        Cerr << "COMPILED " << QueryState->CompileResult->PreparedQuery->GetPhysicalQuery().GetQueryAst() << Endl;
 
         Become(&TKqpSessionActor::ExecuteState);
 

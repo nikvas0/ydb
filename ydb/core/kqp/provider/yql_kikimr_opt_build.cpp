@@ -877,6 +877,7 @@ TVector<TKiDataQueryBlock> MakeKiDataQueryBlocks(TExprBase node, const TKiExplor
 
 TExprNode::TPtr KiBuildQuery(TExprBase node, TExprContext& ctx, TStringBuf database, TIntrusivePtr<TKikimrTablesData> tablesData,
     TTypeAnnotationContext& types, bool concurrentResults) {
+    Cerr << "KiBuildQuery::IN " << ExprToPrettyString(ctx, *node.Ptr()) << Endl;
     if (!node.Maybe<TCoCommit>().DataSink().Maybe<TKiDataSink>()) {
         return node.Ptr();
     }

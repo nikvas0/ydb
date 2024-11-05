@@ -517,7 +517,7 @@ public:
     // use only one of these requests.
     std::unique_ptr<TEvKqp::TEvRecompileRequest> BuildReCompileRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
 
-    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildSplitRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
+    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildSplitRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr, const bool isExplain);
     std::unique_ptr<TEvKqp::TEvCompileRequest> BuildCompileSplittedRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
 
     bool ProcessingLastStatementPart();

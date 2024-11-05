@@ -86,6 +86,7 @@ TAutoPtr<IGraphTransformer> CreateKiPhysicalOptProposalTransformer(TIntrusivePtr
     return CreateFunctorTransformer([sessionCtx](const TExprNode::TPtr& input, TExprNode::TPtr& output,
         TExprContext& ctx)
     {
+        Cerr << "CreateKiPhysicalOptProposalTransformer::IN " << ExprToPrettyString(ctx, *input) << Endl;
         using TStatus = IGraphTransformer::TStatus;
 
         TStatus status = OptimizeExpr(input, output, [sessionCtx](const TExprNode::TPtr& inputNode, TExprContext& ctx) {
@@ -101,6 +102,8 @@ TAutoPtr<IGraphTransformer> CreateKiPhysicalOptProposalTransformer(TIntrusivePtr
 
             return ret;
         }, ctx, TOptimizeExprSettings(nullptr));
+
+       //Cerr << "CreateKiPhysicalOptProposalTransformer::OUT " << ExprToPrettyString(ctx, *output) << Endl;
 
         return status;
     });

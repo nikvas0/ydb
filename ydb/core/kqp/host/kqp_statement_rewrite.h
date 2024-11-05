@@ -12,7 +12,8 @@ std::pair<TVector<NYql::TExprNode::TPtr>, NYql::TIssues> RewriteExpression(
     NYql::TExprContext& ctx,
     NYql::TTypeAnnotationContext& typeCtx,
     const TIntrusivePtr<NYql::TKikimrSessionContext>& sessionCtx,
-    const TString& cluster);
+    const TString& cluster,
+    const bool isExplain);
 
 }
 }
