@@ -3144,6 +3144,51 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
         }
     }
 
+    Y_UNIT_TEST(JsonWrite) {
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableOlapSink(true);
+        auto settings = TKikimrSettings().SetAppConfig(appConfig).SetColumnShardAlterObjectEnabled(true).SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+        Tests::NCommon::TLoggerInit(kikimr).Initialize();
+        auto csController = NYDBTest::TControllers::RegisterCSControllerGuard<NYDBTest::NColumnShard::TController>();
+        //        kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::TX_COLUMNSHARD, NActors::NLog::PRI_DEBUG);
+        kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::TX_COLUMNSHARD_TX, NActors::NLog::PRI_DEBUG);
+
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+
+        {
+            const TString query = R"(
+            CREATE TABLE `/Root/ColumnTable` (
+                Col1 Uint64 NOT NULL,
+                Col2 Json,
+                PRIMARY KEY (Col1)
+            )
+            PARTITION BY HASH(Col1)
+            WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1);
+            )";
+
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_C(result.GetStatus() == NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        auto client = kikimr.GetQueryClient();
+        auto prepareResult1 =
+            client.ExecuteQuery(R"(REPLACE INTO `/Root/ColumnTable` (Col1, Col2) VALUES(1u, '{"a" : "a1"}'), (2u, '{"a" : "a2"}'), 
+                                                                    (3u, '{"b" : "b3"}'), (4u, '{"b" : "b4asdsasdaa", "a" : "a4"}');)",
+                    NYdb::NQuery::TTxControl::BeginTx().CommitTx())
+                .ExtractValueSync();
+        UNIT_ASSERT_C(prepareResult1.IsSuccess(), prepareResult1.GetIssues().ToString());
+
+        {
+            auto it =
+                client.StreamExecuteQuery("SELECT * FROM `/Root/ColumnTable` ORDER BY Col1", NYdb::NQuery::TTxControl::BeginTx().CommitTx())
+                    .ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(it.GetStatus(), NYdb::EStatus::SUCCESS, it.GetIssues().ToString());
+            //TString output = StreamResultToYson(it);
+            //CompareYson(output, R"([[1u;["test1"];10];[2u;["test2"];11];[3u;["test3"];13];[4u;["test4"];14]])");
+        }
+    }
+
 }
 
 }
