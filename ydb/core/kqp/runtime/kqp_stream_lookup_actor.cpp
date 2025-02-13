@@ -46,6 +46,7 @@ public:
         , Counters(counters)
         , LookupActorSpan(TWilsonKqp::LookupActor, std::move(args.TraceId), "LookupActor")
     {
+        Y_ABORT_UNLESS(Snapshot.IsValid());
         IngressStats.Level = args.StatsLevel;
     }
 

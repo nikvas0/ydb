@@ -169,6 +169,7 @@ bool NeedSnapshot(const TKqpTransactionContext& txCtx, const NYql::TKikimrConfig
         return false;
     if (!commitTx)
         return true;
+    return true;
 
     size_t readPhases = 0;
     bool hasEffects = false;

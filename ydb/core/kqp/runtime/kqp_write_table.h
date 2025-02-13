@@ -14,6 +14,8 @@ class IDataBatch : public TThrRefBase {
 public:
     virtual TString SerializeToString() const = 0;
     virtual i64 GetMemory() const = 0;
+    virtual i64 GetRows() const = 0;
+    virtual TString Print(TConstArrayRef<NScheme::TTypeInfo> types) const = 0;
     virtual bool IsEmpty() const = 0;
 };
 

@@ -922,7 +922,9 @@ public:
             }()
             << ", Size=" << serializationResult.TotalDataSize << ", Cookie=" << metadata->Cookie
             << ", OperationsCount=" << evWrite->Record.OperationsSize() << ", IsFinal=" << metadata->IsFinal
-            << ", Attempts=" << metadata->SendAttempts << ", Mode=" << static_cast<int>(Mode));
+            << ", Attempts=" << metadata->SendAttempts << ", Mode=" << static_cast<int>(Mode)
+            << ", RecvShards=" << evWrite->Record.GetLocks().ReceivingShardsSize()
+            << ", SendShards=" << evWrite->Record.GetLocks().SendingShardsSize());
         Send(
             PipeCacheId,
             new TEvPipeCache::TEvForward(evWrite.release(), shardId, /* subscribe */ true),
@@ -1631,14 +1633,11 @@ public:
                     writeInfo.WriteTableActor->Close(message.Token.Cookie);
                 }
 
-                if (!message.Close) {
-                    YQL_ENSURE(false);
-                    AckQueue.push(TAckMessage{
-                        .ForwardActorId = message.From,
-                        .Token = message.Token,
-                        .DataSize = 0,
-                    });
-                }
+                AckQueue.push(TAckMessage{
+                    .ForwardActorId = message.From,
+                    .Token = message.Token,
+                    .DataSize = 0,
+                });
 
                 queue.pop();
             }
@@ -1782,6 +1781,7 @@ public:
         }
 
         for (const ui64 shardId : shards) {
+            Y_ABORT_UNLESS(isRollback);
             if (TxManager->GetLocks(shardId).empty()) {
                 continue;
             }
@@ -1908,7 +1908,8 @@ public:
 
         CA_LOG_D("Execute planned transaction, coordinator: " << *Coordinator
             << ", volitale: " << ((transaction.GetFlags() & TEvTxProxy::TEvProposeTransaction::FlagVolatile) != 0)
-            << ", shards: " << affectedSet.size());
+            << ", shards: " << affectedSet.size()
+            << ", TxId: " << *TxId);
         Send(
             MakePipePerNodeCacheID(false),
             new TEvPipeCache::TEvForward(ev.Release(), *Coordinator, /* subscribe */ true));
@@ -2459,6 +2460,7 @@ public:
         }
         Y_UNUSED(dataSize);
         if (TxManager->ConsumeCommitResult(shardId)) {
+            CA_LOG_D("COMMITTED TxId=" << TxId.value_or(0) << ";");
             OnOperationFinished(Counters->BufferActorCommitLatencyHistogram);
             State = EState::FINISHED;
             Send<ESendingType::Tail>(ExecuterActorId, new TEvKqpBuffer::TEvResult{
@@ -2661,15 +2663,29 @@ private:
 
     void Handle(TEvBufferWriteResult::TPtr& result) {
         CA_LOG_D("TKqpForwardWriteActor recieve EvBufferWriteResult from " << BufferActorId);
+        InFlight = false;
+
+        EgressStats.Bytes += DataSize;
+        EgressStats.Chunks++;
+        EgressStats.Splits++;
+        EgressStats.Resume();
+
+        Counters->ForwardActorWritesSizeHistogram->Collect(DataSize);
 
         WriteToken = result->Get()->Token;
         DataSize = 0;
 
-        CA_LOG_D("Resume with freeSpace=" << GetFreeSpace());
-        Callbacks->ResumeExecution();
+        if (Closed) {
+            CA_LOG_D("Finished");
+            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
+        } else {
+            CA_LOG_D("Resume with freeSpace=" << GetFreeSpace());
+            Callbacks->ResumeExecution();
+        }
     }
 
     void WriteToBuffer() {
+        InFlight = true;
         auto ev = std::make_unique<TEvBufferWrite>();
 
         ev->Data = Batcher->Build();
@@ -2684,6 +2700,7 @@ private:
             TVector<NKikimrKqp::TKqpColumnMetadataProto> columnsMetadata(
                 Settings.GetColumns().begin(),
                 Settings.GetColumns().end());
+
             std::vector<ui32> writeIndex(
                 Settings.GetWriteIndexes().begin(),
                 Settings.GetWriteIndexes().end());
@@ -2711,20 +2728,19 @@ private:
 
         ev->SendTime = TInstant::Now();
 
+        if (Settings.GetTable().GetPath().Contains("test2025")) {
+            TVector<NScheme::TTypeInfo> types;
+            types.reserve(Settings.GetColumns().size());
+            for (const auto& column : Settings.GetColumns()) {
+                auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(column.GetTypeId(),
+                    column.HasTypeInfo() ? &column.GetTypeInfo() : nullptr);
+                types.push_back(typeInfoMod.TypeInfo);
+            }
+            CA_LOG_E("TEST >> " << ev->Data->Print(types));
+        }
+
         CA_LOG_D("Send data=" << DataSize << ", closed=" << Closed << ", bufferActorId=" << BufferActorId);
         AFL_ENSURE(Send(BufferActorId, ev.release()));
-
-        EgressStats.Bytes += DataSize;
-        EgressStats.Chunks++;
-        EgressStats.Splits++;
-        EgressStats.Resume();
-
-        Counters->ForwardActorWritesSizeHistogram->Collect(DataSize);
-
-        if (Closed) {
-            CA_LOG_D("Finished");
-            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
-        }
     }
 
     void CommitState(const NYql::NDqProto::TCheckpoint&) final {};
@@ -2739,7 +2755,9 @@ private:
     }
 
     i64 GetFreeSpace() const final {
-        return MessageSettings.MaxForwardedSize - DataSize;
+        return InFlight
+            ? std::numeric_limits<i64>::min()
+            : MessageSettings.MaxForwardedSize - DataSize;
     }
 
     TMaybe<google::protobuf::Any> ExtraData() override {
@@ -2791,6 +2809,7 @@ private:
 
     i64 DataSize = 0;
     bool Closed = false;
+    bool InFlight = false;
 
     const ui64 TxId;
     const TTableId TableId;

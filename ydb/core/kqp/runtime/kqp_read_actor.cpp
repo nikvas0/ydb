@@ -850,9 +850,9 @@ public:
             << ", limit: " << limit
             << ", readId = " << id
             << ", reverse = " << record.GetReverse()
-            << ", snapshot = (txid=" << Settings->GetSnapshot().GetTxId() << ",step=" << Settings->GetSnapshot().GetStep() << ")"
-            << ", lockTxId = " << Settings->GetLockTxId()
-            << ", lockNodeId = " << Settings->GetLockNodeId());
+            << ", snapshot = (txid=" << record.GetSnapshot().GetTxId() << ", step=" << record.GetSnapshot().GetStep() << ")"
+            << ", lockTxId = " << record.GetLockTxId()
+            << ", lockNodeId = " << record.GetLockNodeId());
 
         Counters->CreatedIterators->Inc();
         ReadIdByTabletId[state->TabletId].push_back(id);

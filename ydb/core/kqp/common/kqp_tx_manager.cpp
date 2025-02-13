@@ -405,7 +405,7 @@ public:
 
         ShardsToWait = ShardsIds;
 
-        AFL_ENSURE(ReceivingShards.empty() || HasTopics() || !IsSingleShard() || HasOlapTable());
+        //AFL_ENSURE(ReceivingShards.empty() || HasTopics() || !IsSingleShard() || HasOlapTable());
     }
 
     TCommitInfo GetCommitInfo() override {

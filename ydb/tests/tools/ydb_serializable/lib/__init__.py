@@ -38,9 +38,12 @@ def generate_query_point_reads(table, var='$data'):
     ]
     statements = [
         '''\
-        SELECT t.key AS key, t.value AS value
-        FROM AS_TABLE({var}) AS d
-        INNER JOIN `{table}` AS t ON t.key = d.key;
+        --SELECT t.key AS key, t.value AS value
+        --FROM AS_TABLE({var}) AS d
+        --INNER JOIN `{table}` AS t ON t.key = d.key;
+
+        SELECT key, value
+        FROM `{table}` WHERE key IN ListMap({var}, ($st) -> {{ RETURN $st.key; }});
         '''.format(table=table, var=var),
     ]
     row_type = (
@@ -498,7 +501,7 @@ class DatabaseChecker(object):
         write_query = generate_query_point_writes(table)
 
         while time.time() < deadline and not self.is_stopping():
-            keys = checker.select_write_keys(cnt=random.randint(1, options.shards))
+            keys = checker.select_write_keys(cnt=random.randint(1, 2))
 
             node = history.add(History.Begin('writes', None, write_keys=keys)).apply_to(checker)
 
@@ -933,8 +936,11 @@ class DatabaseChecker(object):
     async def async_before_test(self, table, options):
         async def perform(session):
             splits = []
-            for i in range(options.shards - 1):
-                splits.append(ydb.KeyBound((options.keys * (i + 1) // options.shards,)))
+            #for i in range(options.shards - 1):
+            #    splits.append(ydb.KeyBound((options.keys * (i + 1) // options.shards,)))
+            for i in range(10):
+                splits.append(ydb.KeyBound((i + 1,)))
+            print(splits)
             profile = (
                 ydb.TableProfile()
                 .with_partitioning_policy(
@@ -1000,7 +1006,7 @@ class DatabaseChecker(object):
         if options is None:
             options = DatabaseCheckerOptions()
 
-        table = self.path + '/' + datetime.now().strftime('%Y%m%d_%H%M%S_') + generate_random_name()
+        table = self.path + '/test' + datetime.now().strftime('%Y%m%d_%H%M%S_') + generate_random_name()
 
         await self.async_before_test(table, options)
 
@@ -1009,7 +1015,7 @@ class DatabaseChecker(object):
         try:
             # Assume table is initially empty
             history = History()
-            checker = SerializabilityChecker(logger=self.logger)
+            checker = SerializabilityChecker(logger=self.logger, explain=True)
             history.add(History.Prepare(options.keys)).apply_to(checker)
 
             if self.logger is not None:

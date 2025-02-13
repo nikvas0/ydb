@@ -12,6 +12,8 @@
 #include <yql/essentials/parser/pg_wrapper/interface/codec.h>
 #include <yql/essentials/utils/yql_panic.h>
 
+#include <ydb/core/tx/datashard/range_ops.h>
+
 namespace NKikimr {
 namespace NKqp {
 
@@ -32,6 +34,14 @@ public:
 
     i64 GetMemory() const override {
         return Memory;
+    }
+
+    i64 GetRows() const override {
+        return Data->num_rows();
+    }
+
+    TString Print(TConstArrayRef<NScheme::TTypeInfo>) const override {
+        return "";
     }
 
     bool IsEmpty() const override {
@@ -63,6 +73,21 @@ public:
 
     i64 GetMemory() const override {
         return Size;
+    }
+
+    i64 GetRows() const override {
+        return Rows;
+    }
+
+    TString Print(TConstArrayRef<NScheme::TTypeInfo> types) const override {
+        TStringBuilder builder;
+        for (i64 row = 0; row < Rows; ++row) {
+            builder << "ROW: " << DebugPrintPoint(
+                types,
+                TArrayRef(Cells.data() + (row * Columns), types.size()),
+                *AppData()->TypeRegistry);
+        }
+        return builder;
     }
 
     bool IsEmpty() const override {
@@ -704,6 +729,22 @@ public:
                 TRowsBatcher(Columns.size(), DataShardMaxOperationBytes));
         }
 
+        /*if (TEST) {
+            TStringBuilder builder;
+
+            builder << "parts:" << "\n";
+            for (const auto& partition : partitioning) {
+                const auto& range = *partition.Range;
+                builder << "# " << DebugPrintPoint(KeyColumnTypes, range.EndKeyPrefix.GetCells(), *AppData()->TypeRegistry) << " incl=" << range.IsInclusive << "\n";
+            }
+            builder << "---" << "\n";
+
+            builder << "ROW: " << DebugPrintPoint(KeyColumnTypes, TArrayRef(row.Cells.data(), KeyColumnTypes.size()), *AppData()->TypeRegistry);
+            builder << "  :: " << shardIter->ShardId << "\n";
+
+            //ythrow yexception() << builder;
+        }*/
+
         Memory += Batchers.at(shardIter->ShardId).AddRow(std::move(row));
         ShardIds.insert(shardIter->ShardId);
     }
@@ -720,6 +761,8 @@ public:
         const auto rows = cells.size() / Columns.size();
         YQL_ENSURE(cells.size() == rows * Columns.size());
 
+        //TEST = (rows == 2);
+
         for (size_t rowIndex = 0; rowIndex < rows; ++rowIndex) {
             AddRow(
                 TRowWithData{
@@ -729,6 +772,8 @@ public:
                 Partitioning);
         }
     }
+
+    //bool TEST = false;
 
     NKikimrDataEvents::EDataFormat GetDataFormat() override {
         return NKikimrDataEvents::FORMAT_CELLVEC;
