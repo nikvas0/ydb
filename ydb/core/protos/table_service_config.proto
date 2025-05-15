@@ -387,4 +387,6 @@ message TTableServiceConfig {
     optional bool FilterPushdownOverJoinOptionalSide = 83 [ default = true ];
 
     optional bool EnableNewRBO = 84 [default = false];
+
+    optional bool EnableIndexStreamWrite = 85 [default = false];
 };
