@@ -388,5 +388,5 @@ message TTableServiceConfig {
 
     optional bool EnableNewRBO = 84 [default = false];
 
-    optional bool EnableIndexStreamWrite = 85 [default = false];
+    optional bool EnableIndexStreamWrite = 85 [default = true];
 };
