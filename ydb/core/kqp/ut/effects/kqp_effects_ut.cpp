@@ -524,6 +524,48 @@ Y_UNIT_TEST_SUITE(KqpEffects) {
         UNIT_ASSERT_VALUES_EQUAL(reads[0]["type"], "Scan");
         UNIT_ASSERT_VALUES_EQUAL(reads[0]["columns"].GetArraySafe().size(), 3);
     }
+
+    Y_UNIT_TEST(EmptyUpdate) {
+        auto kikimr = DefaultKikimrRunner();
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto schemeResult = session.ExecuteSchemeQuery(R"(
+                --!syntax_v1
+
+                CREATE TABLE T1 (
+                    Key Uint32,
+                    Value Uint32,
+                    Timestamp Timestamp,
+                    PRIMARY KEY (Key)
+                ) WITH (TTL = Interval("P1D") ON Timestamp);;
+                CREATE TABLE T2 (
+                    Key Uint32,
+                    Value Uint32,
+                    PRIMARY KEY (Key)
+                );
+            )").ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(schemeResult.GetStatus(), EStatus::SUCCESS, schemeResult.GetIssues().ToString());
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(R"(
+                --!syntax_v1
+
+                $data = SELECT 1u AS Key, 1u AS Value;
+
+                UPDATE T1 ON SELECT Key, Value FROM $data;
+                DELETE FROM T2 WHERE Key = 1;
+            )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto schemeResult = session.DropTable("/Root/T1").ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(schemeResult.GetStatus(), EStatus::SUCCESS, schemeResult.GetIssues().ToString());
+        }
+    }
 }
 
 } // namespace NKqp
