@@ -368,7 +368,6 @@ public:
 
     void Open(
         const TWriteToken token,
-        NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& keyColumnsMetadata,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& columnsMetadata,
         std::vector<ui32>&& writeIndexes,
@@ -377,7 +376,6 @@ public:
         ShardedWriteController->Open(
             token,
             TableId,
-            operationType,
             std::move(keyColumnsMetadata),
             std::move(columnsMetadata),
             std::move(writeIndexes),
@@ -385,12 +383,15 @@ public:
         CA_LOG_D("Open: token=" << token);
     }
 
-    void Write(TWriteToken token, IDataBatchPtr data) {
+    void Write(
+            const TWriteToken token,
+            const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
+            IDataBatchPtr data) {
         YQL_ENSURE(!Closed);
         YQL_ENSURE(ShardedWriteController);
         CA_LOG_D("Write: token=" << token);
-        ShardedWriteController->Write(token, std::move(data));
-        UpdateShards();
+        ShardedWriteController->Write(token, operationType, std::move(data));
+        //UpdateShards();
     }
 
     void Close(TWriteToken token) {
@@ -399,7 +400,7 @@ public:
         CA_LOG_D("Close: token=" << token);
 
         ShardedWriteController->Close(token);
-        UpdateShards();
+        //UpdateShards();
     }
 
     void Close() {
@@ -938,6 +939,11 @@ public:
         }
     }
 
+    void FlushBuffer(const TWriteToken token) {
+        ShardedWriteController->FlushBuffer(token);
+        UpdateShards();
+    }
+
     void FlushBuffers() {
         ShardedWriteController->FlushBuffers();
         UpdateShards();
@@ -1338,10 +1344,12 @@ public:
             const ui64 cookie,
             const i64 priority,
             const TPathId pathId,
+            const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
             std::vector<std::pair<TKqpTableWriteActor*, IDataBatchProjectionPtr>> writes)
         : Cookie(cookie)
         , Priority(priority)
-        , PathId(pathId) {
+        , PathId(pathId)
+        , OperationType(operationType) {
 
         for (const auto& [writeActor, projection] : writes) {
             AFL_ENSURE(projection || writeActor->GetTableId().PathId == pathId);
@@ -1368,19 +1376,28 @@ public:
             return false;
         }
 
-        if (WriteBatches.empty()) {
-            std::swap(WriteBatches, BufferedBatches);
+        if (!HasLookups() && Writes.empty()) {
+            for (auto& batch : BufferedBatches) {
+                Writes.push_back(TWrite {
+                    .NewBatch = std::move(batch),
+                    .OldBatch = nullptr,
+                });
+            }
+            BufferedBatches.clear();
             return true;
         }
         return false;
     }
 
     void Process() {
-        for (auto& batch : WriteBatches) {
-            Memory -= batch->GetMemory();
-            WriteBatch(std::move(batch));
+        for (auto& write : Writes) {
+            Memory -= write.NewBatch->GetMemory();
+            if (write.OldBatch) {
+                Memory -= write.OldBatch->GetMemory();
+            }
+            WriteBatch(std::move(write.NewBatch), std::move(write.OldBatch));
         }
-        WriteBatches.clear();
+        Writes.clear();
 
         if (IsClosed() && IsEmpty() && !IsFinished()) {
             AFL_ENSURE(GetMemory() == 0);
@@ -1393,7 +1410,7 @@ public:
     }
 
     bool IsEmpty() const {
-        return BufferedBatches.empty() && WriteBatches.empty();
+        return BufferedBatches.empty() && Writes.empty();
     }
 
     bool IsClosed() const {
@@ -1413,15 +1430,29 @@ public:
     }
 
 private:
-    void WriteBatch(IDataBatchPtr batch) {
+    void WriteBatch(IDataBatchPtr newBatch, IDataBatchPtr oldBatch) {
         for (auto& [actorPathId, actorInfo] : PathWriteInfo) {
-            // Write to indexes at first
+            // At first, write to indexes
             if (PathId != actorPathId) {
-                auto preparedBatch = actorInfo.Projection->Project(batch);
-                actorInfo.WriteActor->Write(Cookie, preparedBatch);
+                if (oldBatch) {
+                    auto preparedOldBatch = actorInfo.Projection->Project(oldBatch);
+                    actorInfo.WriteActor->Write(
+                        Cookie,
+                        NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE,
+                        preparedOldBatch);
+                    actorInfo.WriteActor->FlushBuffer(Cookie);
+                }
+                auto preparedBatch = actorInfo.Projection->Project(newBatch);
+                actorInfo.WriteActor->Write(
+                    Cookie,
+                    OperationType == NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE
+                        ? NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE
+                        : NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT,
+                    preparedBatch);
+                actorInfo.WriteActor->FlushBuffer(Cookie);
             }
         }
-        PathWriteInfo.at(PathId).WriteActor->Write(Cookie, std::move(batch));
+        PathWriteInfo.at(PathId).WriteActor->Write(Cookie, OperationType, std::move(newBatch));
     }
 
     void CloseWrite() {
@@ -1434,6 +1465,7 @@ private:
     const ui64 Cookie;
     const i64 Priority;
     const TPathId PathId;
+    const NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
 
     struct TPathWriteInfo {
         IDataBatchProjectionPtr Projection = nullptr;
@@ -1453,7 +1485,11 @@ private:
     // TODO: std::vector<IDataBatchPtr> WaitLookupBatches;
     // TODO: std::vector<TDataBatchPtr> CheckUniqueBatches;
     // TODO: std::vector<IDataBatchPtr> WaitCheckUniqueBatches;
-    std::vector<IDataBatchPtr> WriteBatches;
+    struct TWrite {
+        IDataBatchPtr NewBatch;
+        IDataBatchPtr OldBatch;
+    };
+    std::vector<TWrite> Writes;
 };
 
 class TKqpDirectWriteActor : public TActorBootstrapped<TKqpDirectWriteActor>, public NYql::NDq::IDqComputeActorAsyncOutput, public IKqpTableWriterCallbacks {
@@ -1537,7 +1573,6 @@ public:
             YQL_ENSURE(Settings.GetPriority() == 0);
             WriteTableActor->Open(
                 WriteToken,
-                GetOperation(Settings.GetType()),
                 std::move(keyColumnsMetadata),
                 std::move(columnsMetadata),
                 std::move(writeIndex),
@@ -1616,7 +1651,7 @@ private:
         try {
             Batcher->AddData(data);
             YQL_ENSURE(WriteTableActor);
-            WriteTableActor->Write(WriteToken, Batcher->Build());
+            WriteTableActor->Write(WriteToken, GetOperation(Settings.GetType()), Batcher->Build());
             if (Closed) {
                 WriteTableActor->Close(WriteToken);
                 WriteTableActor->FlushBuffers();
@@ -2036,7 +2071,6 @@ public:
 
                 writeInfo.Actors.at(indexSettings.TableId.PathId).WriteActor->Open(
                     token.Cookie,
-                    NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT, // TODO: Operation for index (delete by key + upsert)
                     std::move(indexSettings.KeyColumns),
                     std::move(indexSettings.Columns),
                     std::move(indexSettings.WriteIndex),
@@ -2052,7 +2086,6 @@ public:
 
             writeInfo.Actors.at(settings.TableId.PathId).WriteActor->Open(
                 token.Cookie,
-                settings.OperationType,
                 std::move(settings.KeyColumns),
                 std::move(settings.Columns),
                 std::move(settings.WriteIndex),
@@ -2067,6 +2100,7 @@ public:
                     token.Cookie,
                     settings.Priority,
                     settings.TableId.PathId,
+                    settings.OperationType,
                     std::move(writes)
                 });
         } else {
