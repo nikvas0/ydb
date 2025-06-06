@@ -2012,12 +2012,12 @@ public:
 
             AFL_ENSURE(writeInfo.Actors.size() > settings.Indexes.size());
             for (auto& indexSettings : settings.Indexes) {
-                writeInfo.Actors.at(indexSettings.TableId.PathId).Projections.emplace(token.Cookie, CreateDataBatchProjection(
+                auto projection = CreateDataBatchProjection(
                     settings.Columns,
                     settings.WriteIndex,
                     indexSettings.Columns,
                     indexSettings.WriteIndex,
-                    Alloc));
+                    Alloc);
 
                 writeInfo.Actors.at(indexSettings.TableId.PathId).WriteActor->Open(
                     token.Cookie,
@@ -2029,7 +2029,7 @@ public:
 
                 writes.emplace_back(
                     writeInfo.Actors.at(indexSettings.TableId.PathId).WriteActor,
-                    writeInfo.Actors.at(indexSettings.TableId.PathId).Projections.at(token.Cookie));
+                    projection);
             }
 
             // At current time only insert operation can fail.
@@ -2072,7 +2072,7 @@ public:
 
     bool Process() {
         ProcessRequestQueue();
-        ProcessWrite();
+        ProcessTasks();
         if (!ProcessFlush()) {
             return false;
         }
@@ -2123,7 +2123,7 @@ public:
         }
     }
 
-    void ProcessWrite() {
+    void ProcessTasks() {
         for (auto& [pathId, writeTask] : WriteTasks) {
             do {
                 writeTask.Process();
@@ -3178,7 +3178,6 @@ private:
 
     struct TWriteInfo {
         struct TActorInfo {
-            THashMap<IShardedWriteController::TWriteToken, IDataBatchProjectionPtr> Projections;
             TKqpTableWriteActor* WriteActor = nullptr;
             TActorId Id;
         };
