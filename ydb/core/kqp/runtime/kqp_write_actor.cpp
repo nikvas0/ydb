@@ -1971,6 +1971,22 @@ public:
                 return {ptr, id};
             };
 
+            auto checkSchemaVersion = [&](TKqpTableWriteActor* writeActor, const TTableId tableId, const TString& tablePath) -> bool {
+                if (writeActor->GetTableId().SchemaVersion != tableId.SchemaVersion) {
+                    CA_LOG_E("Scheme changed for table `"
+                        << tablePath << "`.");
+                    ReplyErrorAndDie(
+                        NYql::NDqProto::StatusIds::SCHEME_ERROR,
+                        NYql::TIssuesIds::KIKIMR_SCHEME_MISMATCH,
+                        TStringBuilder() << "Scheme changed. Table: `"
+                            << tablePath << "`.",
+                        {});
+                    return false;
+                }
+                AFL_ENSURE(writeActor->GetTableId() == tableId);  
+                return true;
+            };
+
             auto& writeInfo = WriteInfos[settings.TableId.PathId];
             if (!writeInfo.Actors.contains(settings.TableId.PathId)) {
                 AFL_ENSURE(writeInfo.Actors.empty());
@@ -1979,6 +1995,13 @@ public:
                     .WriteActor = ptr,
                     .Id = id,
                 });
+            } else {
+                if (!checkSchemaVersion(
+                        writeInfo.Actors.at(settings.TableId.PathId).WriteActor,
+                        settings.TableId,
+                        settings.TablePath)) {
+                    return;
+                }
             }
 
             for (const auto& indexSettings : settings.Indexes) {
@@ -1988,21 +2011,13 @@ public:
                         .WriteActor = ptr,
                         .Id = id,
                     });
+                } else if (!checkSchemaVersion(
+                        writeInfo.Actors.at(indexSettings.TableId.PathId).WriteActor,
+                        indexSettings.TableId,
+                        indexSettings.TablePath)) {
+                    return;
                 }
             }
-
-            if (writeInfo.Actors.at(settings.TableId.PathId).WriteActor->GetTableId().SchemaVersion != settings.TableId.SchemaVersion) {
-                CA_LOG_E("Scheme changed for table `"
-                    << settings.TablePath << "`.");
-                ReplyErrorAndDie(
-                    NYql::NDqProto::StatusIds::SCHEME_ERROR,
-                    NYql::TIssuesIds::KIKIMR_SCHEME_MISMATCH,
-                    TStringBuilder() << "Scheme changed. Table: `"
-                        << settings.TablePath << "`.",
-                    {});
-                return;
-            }
-            AFL_ENSURE(writeInfo.Actors.at(settings.TableId.PathId).WriteActor->GetTableId() == settings.TableId);
 
             EnableStreamWrite &= settings.EnableStreamWrite;
 
