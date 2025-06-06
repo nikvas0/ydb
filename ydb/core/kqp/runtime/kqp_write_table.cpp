@@ -1113,15 +1113,16 @@ namespace {
 
 struct TMetadata {
     const TTableId TableId;
-    const NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
     const TVector<NKikimrKqp::TKqpColumnMetadataProto> KeyColumnsMetadata;
     const TVector<NKikimrKqp::TKqpColumnMetadataProto> InputColumnsMetadata;
     const std::vector<ui32> WriteIndex;
     const i64 Priority;
+    NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
 };
 
 struct TBatchWithMetadata {
     IShardedWriteController::TWriteToken Token = std::numeric_limits<IShardedWriteController::TWriteToken>::max();
+    NKikimrDataEvents::TEvWrite::TOperation::EOperationType OperationType;
     IDataBatchPtr Data = nullptr;
     bool HasRead = false;
 
@@ -1393,7 +1394,6 @@ public:
     void Open(
         const TWriteToken token,
         const TTableId tableId,
-        const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& keyColumns,
         TVector<NKikimrKqp::TKqpColumnMetadataProto>&& inputColumns,
         std::vector<ui32>&& writeIndex,
@@ -1403,11 +1403,11 @@ public:
             TWriteInfo {
                 .Metadata = TMetadata {
                     .TableId = tableId,
-                    .OperationType = operationType,
                     .KeyColumnsMetadata = std::move(keyColumns),
                     .InputColumnsMetadata = std::move(inputColumns),
                     .WriteIndex = std::move(writeIndex),
                     .Priority = priority,
+                    .OperationType = NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UNSPECIFIED,
                 },
                 .Serializer = nullptr,
                 .Closed = false,
@@ -1430,11 +1430,17 @@ public:
         }
     }
 
-    void Write(TWriteToken token, IDataBatchPtr&& data) override {
+    void Write(
+            const TWriteToken token,
+            const NKikimrDataEvents::TEvWrite::TOperation::EOperationType operationType,
+            IDataBatchPtr&& data) override {
         auto& info = WriteInfos.at(token);
         AFL_ENSURE(!info.Closed);
-
         AFL_ENSURE(info.Serializer);
+        AFL_ENSURE(operationType != NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UNSPECIFIED);
+        AFL_ENSURE(info.Metadata.OperationType == operationType || info.Serializer->IsEmpty());
+        info.Metadata.OperationType = operationType;
+
         if (!data->AttachedAlloc()) {
             AFL_ENSURE(!Settings.Inconsistent);
             data->AttachAlloc(Alloc);
@@ -1457,6 +1463,15 @@ public:
             } else {
                 ++it;
             }
+        }
+    }
+
+    void FlushBuffer(const TWriteToken token) override {
+        FlushSerializer(token, true);
+        const auto& writeInfo = WriteInfos.at(token);
+        if (writeInfo.Metadata.Priority != 0) {
+            AFL_ENSURE(writeInfo.Closed);
+            AFL_ENSURE(writeInfo.Serializer->IsFinished());
         }
     }
 
@@ -1549,7 +1564,7 @@ public:
                         .AddDataToPayload(inFlightBatch.Data->SerializeToString());
                 const auto& writeInfo = WriteInfos.at(inFlightBatch.Token);
                 evWrite.AddOperation(
-                    writeInfo.Metadata.OperationType,
+                    inFlightBatch.OperationType,
                     writeInfo.Metadata.TableId,
                     writeInfo.Serializer->GetWriteColumnIds(),
                     payloadIndex,
@@ -1667,6 +1682,7 @@ private:
                                 || writeInfo.Metadata.OperationType == NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE);
                         ShardsInfo.GetShard(shardId).PushBatch(TBatchWithMetadata{
                             .Token = token,
+                            .OperationType = writeInfo.Metadata.OperationType,
                             .Data = std::move(batch),
                             .HasRead = hasRead,
                         });
@@ -1689,6 +1705,7 @@ private:
                         || writeInfo.Metadata.OperationType == NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE);
                     shard.PushBatch(TBatchWithMetadata{
                         .Token = token,
+                        .OperationType = writeInfo.Metadata.OperationType,
                         .Data = std::move(batch),
                         .HasRead = hasRead,
                     });
