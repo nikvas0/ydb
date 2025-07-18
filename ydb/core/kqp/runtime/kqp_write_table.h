@@ -67,6 +67,8 @@ std::vector<TConstArrayRef<TCell>> GetSortedUniqueRows(
     const std::vector<NKikimr::NKqp::IDataBatchPtr>& batches,
     const TConstArrayRef<NScheme::TTypeInfo> keyColumnTypes);
 
+std::vector<TConstArrayRef<TCell>> CutColumns(const std::vector<TConstArrayRef<TCell>>& rows, const ui32 columnsCount);
+
 class IShardedWriteController : public TThrRefBase {
 public:
     virtual void OnPartitioningChanged(
