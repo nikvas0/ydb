@@ -27,6 +27,33 @@ NActors::TActorId MainPipeCacheId = NKikimr::MakePipePerNodeCacheID(false);
 NActors::TActorId FollowersPipeCacheId = NKikimr::MakePipePerNodeCacheID(true);
 
 class TKqpStreamLookupActor : public NActors::TActorBootstrapped<TKqpStreamLookupActor>, public NYql::NDq::IDqComputeActorAsyncInput {
+
+    struct TEvPrivate {
+        enum EEv {
+            EvRetryRead = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
+            EvSchemeCacheRequestTimeout,
+            EvLookupLogFreezeInfo,
+        };
+
+        struct TEvSchemeCacheRequestTimeout : public TEventLocal<TEvSchemeCacheRequestTimeout, EvSchemeCacheRequestTimeout> {
+        };
+
+        struct TEvLookupLogFreezeInfo : public TEventLocal<TEvLookupLogFreezeInfo, EvLookupLogFreezeInfo> {
+        };
+
+        struct TEvRetryRead : public TEventLocal<TEvRetryRead, EvRetryRead> {
+            explicit TEvRetryRead(ui64 readId, ui64 lastSeqNo, bool instantStart = false)
+                : ReadId(readId)
+                , LastSeqNo(lastSeqNo)
+                , InstantStart(instantStart) {
+            }
+
+            const ui64 ReadId;
+            const ui64 LastSeqNo;
+            const bool InstantStart;
+        };
+    };
+
 public:
     TKqpStreamLookupActor(NYql::NDq::IDqAsyncIoFactory::TInputTransformArguments&& args, NKikimrKqp::TKqpStreamLookupSettings&& settings,
         TIntrusivePtr<TKqpCounters> counters)
@@ -66,6 +93,11 @@ public:
         Counters->StreamLookupActorsCount->Inc();
         ResolveTableShards();
         Become(&TKqpStreamLookupActor::StateFunc);
+
+        TlsActivationContext->Schedule(
+            TDuration::Minutes(10),
+            new IEventHandle(SelfId(), SelfId(), new TEvPrivate::TEvLookupLogFreezeInfo())
+        );
     }
 
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
@@ -224,28 +256,6 @@ private:
         }
     };
 
-    struct TEvPrivate {
-        enum EEv {
-            EvRetryRead = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
-            EvSchemeCacheRequestTimeout
-        };
-
-        struct TEvSchemeCacheRequestTimeout : public TEventLocal<TEvSchemeCacheRequestTimeout, EvSchemeCacheRequestTimeout> {
-        };
-
-        struct TEvRetryRead : public TEventLocal<TEvRetryRead, EvRetryRead> {
-            explicit TEvRetryRead(ui64 readId, ui64 lastSeqNo, bool instantStart = false)
-                : ReadId(readId)
-                , LastSeqNo(lastSeqNo)
-                , InstantStart(instantStart) {
-            }
-
-            const ui64 ReadId;
-            const ui64 LastSeqNo;
-            const bool InstantStart;
-        };
-    };
-
 private:
     void SaveState(const NYql::NDqProto::TCheckpoint&, NYql::NDq::TSourceState&) final {}
     void LoadState(const NYql::NDq::TSourceState&) final {}
@@ -338,6 +348,7 @@ private:
                 hFunc(TEvDataShard::TEvReadResult, Handle);
                 hFunc(TEvPipeCache::TEvDeliveryProblem, Handle);
                 hFunc(TEvPrivate::TEvSchemeCacheRequestTimeout, Handle);
+                hFunc(TEvPrivate::TEvLookupLogFreezeInfo, Handle);
                 hFunc(TEvPrivate::TEvRetryRead, Handle);
                 IgnoreFunc(TEvTxProxySchemeCache::TEvInvalidateTableResult);
                 default:
@@ -348,6 +359,40 @@ private:
             RuntimeError("Memory limit exceeded at stream lookup", NYql::NDqProto::StatusIds::PRECONDITION_FAILED);
         } catch (const yexception& e) {
             RuntimeError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
+    }
+
+    void Handle(TEvPrivate::TEvLookupLogFreezeInfo::TPtr&) {
+        const bool inputRowsFinished = LastFetchStatus == NUdf::EFetchStatus::Finish;
+        const bool allReadsFinished = AllReadsFinished();
+        const bool allRowsProcessed = StreamLookupWorker->AllRowsProcessed();
+
+        CA_LOG_E("TEST>> FREEZE >> inputRowsFinished=" << inputRowsFinished
+            << " allReadsFinished=" << allReadsFinished
+            << " allRowsProcessed=" << allRowsProcessed);
+
+        if (!inputRowsFinished) {
+            return;
+        }
+
+        CA_LOG_E("TEST>> "
+            << " InFlightReads = " << Reads.InFlightReads()
+            << " ReadRowsCount = " << ReadRowsCount
+            << " ReadBytesCount = " << ReadBytesCount
+            << " TotalRetryAttempts = " << TotalRetryAttempts
+            << " TotalResolveShardsAttempts = " << TotalResolveShardsAttempts
+            << " ResolveShardsInProgress = " << ResolveShardsInProgress);
+
+        {
+            TStringBuilder sb;
+            for (auto& [_, read] : Reads.Reads) {
+                sb << read.Id << ", ";
+            }
+            CA_LOG_E("TEST>> ReadsInFlight: " << sb);
+        }
+
+        for (const auto& line : StreamLookupWorker->GetInfo()) {
+            CA_LOG_E("TEST>> WORKER:: " << line);   
         }
     }
 
@@ -451,8 +496,9 @@ private:
             case Ydb::StatusIds::NOT_FOUND:
             {
                 StreamLookupWorker->ResetRowsProcessing(read.Id);
-                CA_LOG_D("NOT_FOUND was received from tablet: " << read.ShardId << ". "
-                    << getIssues().ToOneLineString());
+                CA_LOG_E("NOT_FOUND: " << read.ShardId << ". "
+                     << " ResetRowsProcessing:: " << read.Id << " "
+                     << getIssues().ToOneLineString());
                 Reads.erase(read);
                 return ResolveTableShards();
             }
@@ -462,7 +508,7 @@ private:
                         TStringBuilder() << "Table '" << StreamLookupWorker->GetTablePath() << "' retry limit exceeded.",
                         NYql::NDqProto::StatusIds::OVERLOADED);
                 }
-                CA_LOG_D("OVERLOADED was received from tablet: " << read.ShardId << "."
+                CA_LOG_E("OVERLOADED was received from tablet: " << read.ShardId << "."
                     << getIssues().ToOneLineString());
                 read.SetBlocked();
                 return RetryTableRead(read, /*allowInstantRetry = */false);
@@ -473,7 +519,7 @@ private:
                         TStringBuilder() << "Table '" << StreamLookupWorker->GetTablePath() << "' retry limit exceeded.",
                         NYql::NDqProto::StatusIds::INTERNAL_ERROR);
                 }
-                CA_LOG_D("INTERNAL_ERROR was received from tablet: " << read.ShardId << "."
+                CA_LOG_E("INTERNAL_ERROR was received from tablet: " << read.ShardId << "."
                     << getIssues().ToOneLineString());
                 read.SetBlocked();
                 return RetryTableRead(read);
@@ -518,7 +564,7 @@ private:
     }
 
     void Handle(TEvPipeCache::TEvDeliveryProblem::TPtr& ev) {
-        CA_LOG_D("TEvDeliveryProblem was received from tablet: " << ev->Get()->TabletId);
+        CA_LOG_E("TEvDeliveryProblem was received from tablet: " << ev->Get()->TabletId);
 
         const auto& tabletId = ev->Get()->TabletId;
 
@@ -541,7 +587,7 @@ private:
 
         if (!Partitioning) {
             LookupActorStateSpan.EndError("timeout exceeded");
-            CA_LOG_D("Retry attempt to resolve shards for table: " << StreamLookupWorker->GetTablePath());
+            CA_LOG_E("Retry attempt to resolve shards for table: " << StreamLookupWorker->GetTablePath());
             ResolveShardsInProgress = false;
             ResolveTableShards();
         }
@@ -560,7 +606,9 @@ private:
 
         if ((read.State == EReadState::Running && read.LastSeqNo <= ev->Get()->LastSeqNo) || read.State == EReadState::Blocked) {
             if (ev->Get()->InstantStart) {
+                auto prevReadId = ReadId;
                 auto requests = StreamLookupWorker->RebuildRequest(read.Id, ReadId);
+                CA_LOG_E("RebuildRequest:: " << read.Id << " -> " << (prevReadId + 1) << "-" << ReadId);
                 for (auto& request : requests) {
                     StartTableRead(read.ShardId, std::move(request));
                 }
@@ -662,6 +710,7 @@ private:
         ++TotalRetryAttempts;
 
         if (Reads.CheckShardRetriesExeeded(failedRead)) {
+            CA_LOG_E("CheckShardRetriesExeeded:: ResetRowsProcessing:: " << failedRead.Id);
             StreamLookupWorker->ResetRowsProcessing(failedRead.Id);
             Reads.erase(failedRead);
             return ResolveTableShards();
@@ -669,7 +718,9 @@ private:
 
         auto delay = Reads.CalcDelayForShard(failedRead, allowInstantRetry);
         if (delay == TDuration::Zero()) {
+            auto prevReadId = ReadId;
             auto requests = StreamLookupWorker->RebuildRequest(failedRead.Id, ReadId);
+            CA_LOG_E("RebuildRequest:: " << failedRead.Id << " -> " << (prevReadId + 1) << "-" << ReadId);
             for (auto& request : requests) {
                 StartTableRead(failedRead.ShardId, std::move(request));
             }

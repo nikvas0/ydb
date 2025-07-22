@@ -81,6 +81,8 @@ public:
     virtual void ResetRowsProcessing(ui64 readId) = 0;
     virtual bool IsOverloaded() = 0;
 
+    virtual std::vector<TString> GetInfo() = 0;
+
 protected:
     const NMiniKQL::TTypeEnvironment& TypeEnv;
     const NMiniKQL::THolderFactory& HolderFactory;

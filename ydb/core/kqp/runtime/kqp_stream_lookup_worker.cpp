@@ -436,6 +436,10 @@ public:
         ReadStateByReadId.erase(it);
     }
 
+    std::vector<TString> GetInfo() override {
+        return {};
+    }
+
 private:
     void FillReadRequest(ui64 readId, THolder<TEvDataShard::TEvRead>& request, const std::vector<TOwnedTableRange>& ranges) {
         auto& record = request->Record;
@@ -1070,6 +1074,31 @@ private:
         rowStats.ResultBytesCount += leftRowSize + rightRowSize;
 
         return resultRow;
+    }
+
+    std::vector<TString> GetInfo() override {
+        std::vector<TString>  lines;
+        lines.push_back(TStringBuilder()
+            << "UnprocessedRows: " << UnprocessedRows.size()
+            << ", UnprocessedKeys: " << UnprocessedKeys.size()
+            << ", ReadStateByReadId: " << ReadStateByReadId.size()
+            << ", PendingLeftRowsByKey: " << PendingLeftRowsByKey.size()
+            << ", ResultRowsBySeqNo: " << ResultRowsBySeqNo.size()
+            << ", InputRowSeqNo: " << InputRowSeqNo
+            << ", CurrentResultSeqNo: " << CurrentResultSeqNo);
+
+        for (const auto& [_, value] : PendingLeftRowsByKey) {
+            lines.push_back([&]() {
+                TStringBuilder sb;
+                sb << "LEFTROW:: " << value.RightRowExist << " :: ";
+
+                for (const auto& read : value.PendingReads) {
+                    sb << read << " ";
+                }
+                return sb;
+            }());
+        }
+        return lines;
     }
 
 private:
