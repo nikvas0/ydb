@@ -29,7 +29,7 @@ AS SELECT ...
 
 * `CREATE TABLE AS` поддерживается только в режиме [неявного контроля транзакций](../../../../concepts/transactions.md#implicit). Таблица появится по указанному пути уже заполненной.
 
-* `CREATE TABLE AS` может быть только единственным DML/DDL выражением в запросе. Допустимо использование [PRAGMA](../pragma.md), [DECLARE](../declare.md) и [именованных выражений](../expressions.md#named-nodes).
+* `CREATE TABLE AS` может быть только единственным [DML](https://en.wikipedia.org/wiki/Data_manipulation_language)/[DDL](https://en.wikipedia.org/wiki/Data_definition_language) выражением в запросе. Допустимо использование [PRAGMA](../pragma.md), [DECLARE](../declare.md) и [именованных выражений](../expressions.md#named-nodes).
 
 * `CREATE TABLE AS` не конфликтует с другими транзакциями. При выполнении запроса не используются блокировки, а все чтения производятся из консистентного снапшота. Балансировка или разделение [таблеток](../../../../concepts/glossary.md#tablet) не приводят к ошибкам.
 
