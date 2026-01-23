@@ -118,20 +118,24 @@ TExprBase KqpBuildReturning(TExprBase node, TExprContext& ctx, const TTypeAnnota
                         .Input("keys_list")
                         .Lambda()
                             .Args({existingRow})
-                            .Body<TCoJust>()
-                                .Input<TCoFlattenMembers>()
-                                    .Add()
-                                        .Name().Build("")
-                                        .Value<TCoUnwrap>() // Key should always exist in the dict
-                                            .Optional<TCoLookup>()
-                                                .Collection("dict")
-                                                .Lookup(SelectFields(existingRow, tableDesc.Metadata->KeyColumnNames, ctx, pos))
+                            .Body<TCoFlatMap>()
+                                .Input<TCoLookup>()
+                                    .Collection("dict")
+                                    .Lookup(SelectFields(existingRow, tableDesc.Metadata->KeyColumnNames, ctx, pos))
+                                    .Build()
+                                .Lambda()
+                                    .Args({"payload"})
+                                    .Body<TCoJust>()
+                                        .Input<TCoFlattenMembers>()
+                                            .Add()
+                                                .Name().Build("")
+                                                .Value("payload")
+                                                .Build()
+                                            .Add()
+                                                .Name().Build("")
+                                                .Value(SelectFields(existingRow, additionalColumnsToRead, ctx, pos))
                                                 .Build()
                                             .Build()
-                                        .Build()
-                                    .Add()
-                                        .Name().Build("")
-                                        .Value(SelectFields(existingRow, additionalColumnsToRead, ctx, pos))
                                         .Build()
                                     .Build()
                                 .Build()
@@ -147,19 +151,57 @@ TExprBase KqpBuildReturning(TExprBase node, TExprContext& ctx, const TTypeAnnota
                     .Index().Build("0")
                     .Build()
                 .Done();
-        } else if (NDq::IsDqPureExpr(input.Cast())) {
-            input = Build<TDqCnUnionAll>(ctx, pos)
-                .Output()
-                    .Stage<TDqStage>()
-                        .Inputs().Build()
-                        .Program()
-                            .Args({})
-                            .Body<TCoToFlow>()
-                                .Input(input.Cast())
+        } else {
+            // For DELETE operations, we need to filter out non-existent rows even if there are no additional columns to read
+            auto payloadSelectorArg = TCoArgument(ctx.NewArgument(pos, "payload_selector_row"));
+            auto payloadSelector = Build<TCoLambda>(ctx, pos)
+                .Args({payloadSelectorArg})
+                .Body(SelectFields(payloadSelectorArg, tableDesc.Metadata->KeyColumnNames, ctx, pos))
+                .Done();
+            
+            auto condenseResult = CondenseInputToDictByPk(input.Cast(), tableDesc, payloadSelector, ctx);
+            if (!condenseResult) {
+                return node;
+            }
+            
+            auto inputDictAndKeys = PrecomputeDictAndKeys(*condenseResult, pos, ctx);
+
+            TCoArgument existingRow = Build<TCoArgument>(ctx, node.Pos())
+                .Name("existing_row")
+                .Done();
+
+            auto prepareUpdateStage = Build<TDqStage>(ctx, pos)
+                .Inputs()
+                    .Add(BuildStreamLookupOverPrecompute(tableDesc, inputDictAndKeys.KeysPrecompute, input.Cast(), returning.Table(), pos, ctx, {}))
+                    .Add(inputDictAndKeys.DictPrecompute)
+                    .Build()
+                .Program()
+                    .Args({"keys_list", "dict"})
+                    .Body<TCoFlatMap>()
+                        .Input("keys_list")
+                        .Lambda()
+                            .Args({existingRow})
+                            .Body<TCoFlatMap>()
+                                .Input<TCoLookup>()
+                                    .Collection("dict")
+                                    .Lookup(SelectFields(existingRow, tableDesc.Metadata->KeyColumnNames, ctx, pos))
+                                    .Build()
+                                .Lambda()
+                                    .Args({"payload"})
+                                    .Body<TCoJust>()
+                                        .Input(existingRow)
+                                        .Build()
+                                    .Build()
                                 .Build()
                             .Build()
-                        .Settings().Build()
+                        .Build()
                     .Build()
+                .Settings().Build()
+                .Done();
+
+            input = Build<TDqCnUnionAll>(ctx, pos)
+                .Output()
+                    .Stage(prepareUpdateStage)
                     .Index().Build("0")
                     .Build()
                 .Done();
