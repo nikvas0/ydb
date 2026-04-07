@@ -828,6 +828,17 @@ public:
     }
 
     void CompileStatement() {
+        // For READ COMMITTED isolation level, acquire a new snapshot for each statement
+        if (QueryState->TxCtx && QueryState->TxCtx->EffectiveIsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) {
+            if (QueryState->TxCtx->GetSnapshot().IsValid()) {
+                // Discard existing snapshot and acquire a new one
+                DiscardPersistentSnapshot(QueryState->TxCtx->SnapshotHandle);
+                QueryState->TxCtx->SnapshotHandle = IKqpGateway::TKqpSnapshotHandle();
+            }
+            AcquireMvccSnapshot();
+            return;
+        }
+
         // quick path
         if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId()) && !QueryState->CompileResult->NeedToSplit) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);

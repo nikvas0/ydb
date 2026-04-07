@@ -328,6 +328,8 @@ public:
         AFL_ENSURE(Settings.LockTxId && Settings.LockNodeId);
         record.SetLockTxId(Settings.LockTxId);
         record.SetLockNodeId(Settings.LockNodeId);
+
+        AFL_ENSURE(!isUniqueCheck || Settings.LockMode != NKikimrDataEvents::PESSIMISTIC_NONE);
         record.SetLockMode(!isUniqueCheck
             ? Settings.LockMode
             : NKikimrDataEvents::OPTIMISTIC);

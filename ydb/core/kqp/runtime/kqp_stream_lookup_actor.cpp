@@ -415,6 +415,8 @@ private:
             YQL_ENSURE(LockMode == NKikimrDataEvents::OPTIMISTIC_SNAPSHOT_ISOLATION);
         } else if (LockTxId && IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_SERIALIZABLE) {
             YQL_ENSURE(LockMode == NKikimrDataEvents::OPTIMISTIC);
+        } else if (LockTxId && IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW) {
+            YQL_ENSURE(LockMode == NKikimrDataEvents::PESSIMISTIC_NONE);
         }
         LookupActorStateSpan.EndOk();
 

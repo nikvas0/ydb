@@ -220,6 +220,11 @@ public:
                 Readonly = false;
                 break;
 
+            case Ydb::Table::TransactionSettings::kReadCommittedReadWrite:
+                EffectiveIsolationLevel = NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW;
+                Readonly = false;
+                break;
+
             case Ydb::Table::TransactionSettings::TX_MODE_NOT_SET:
                 YQL_ENSURE(false, "tx_mode not set, settings: " << settings);
                 break;
@@ -266,7 +271,8 @@ public:
     void ApplyPhysicalQuery(const NKqpProto::TKqpPhyQuery& phyQuery, const bool commit) {
         NeedUncommittedChangesFlush = (DeferredEffects.Size() > kMaxDeferredEffects)
             || phyQuery.GetForceImmediateEffectsExecution()
-            || HasUncommittedChangesRead(ModifiedTablesSinceLastFlush, phyQuery, commit);
+            || HasUncommittedChangesRead(ModifiedTablesSinceLastFlush, phyQuery, commit)
+            || EffectiveIsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW;
         if (NeedUncommittedChangesFlush) {
             ModifiedTablesSinceLastFlush.clear();
         }

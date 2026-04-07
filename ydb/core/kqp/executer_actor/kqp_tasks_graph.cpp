@@ -1399,6 +1399,8 @@ void TKqpTasksGraph::FillInputDesc(NYql::NDqProto::TTaskInput& inputDesc, const 
             }
 
             if (lockTxId && GetMeta().LockMode && !isTableImmutable) {
+                AFL_ENSURE(input.Meta.StreamLookupSettings->GetLookupStrategy() != NKqpProto::EStreamLookupStrategy::UNIQUE
+                    || GetMeta().LockMode != NKikimrDataEvents::PESSIMISTIC_NONE);
                 input.Meta.StreamLookupSettings->SetLockMode(
                     // Unique Index needs read lock even in snapshot isolation mode.
                     input.Meta.StreamLookupSettings->GetLookupStrategy() != NKqpProto::EStreamLookupStrategy::UNIQUE
