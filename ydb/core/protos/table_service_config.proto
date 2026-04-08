@@ -467,6 +467,7 @@ message TTableServiceConfig {
         SnapshotRW = 1;
         SnapshotRO = 2;
         StaleRO = 3;
+        ReadCommittedRW = 4;
     }
 
     optional ETxMode DefaultTxMode = 116 [default = SerializableRW];

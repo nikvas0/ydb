@@ -284,7 +284,8 @@ std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildCompileRequest(s
     settings.RuntimeParameterSizeLimitSatisfied = RuntimeParameterSizeLimitSatisfied;
 
     bool keepInCache = false;
-    bool perStatementResult = HasImplicitTx();
+    bool perStatementResult = true; // HasImplicitTx() || (TxCtx && TxCtx->EffectiveIsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW);
+    Cerr << "TEST >> BuildCompileRequest >> " <<  perStatementResult << " " << !!TxCtx << " " << /*(TxCtx->EffectiveIsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW)*/0 << Endl;
     TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
     switch (GetAction()) {
         case NKikimrKqp::QUERY_ACTION_EXECUTE:

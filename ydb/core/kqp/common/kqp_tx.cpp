@@ -55,6 +55,11 @@ bool NeedSnapshot(const TKqpTransactionContext& txCtx, const NYql::TKikimrConfig
         *txCtx.EffectiveIsolationLevel != NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW)
         return false;
 
+    if (*txCtx.EffectiveIsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) {
+        // TODO: avoid snapshot for some queries
+        return true;
+    }
+
     if (txCtx.GetSnapshot().IsValid())
         return false;
 

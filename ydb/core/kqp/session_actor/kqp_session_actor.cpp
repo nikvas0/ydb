@@ -828,17 +828,6 @@ public:
     }
 
     void CompileStatement() {
-        // For READ COMMITTED isolation level, acquire a new snapshot for each statement
-        if (QueryState->TxCtx && QueryState->TxCtx->EffectiveIsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) {
-            if (QueryState->TxCtx->GetSnapshot().IsValid()) {
-                // Discard existing snapshot and acquire a new one
-                DiscardPersistentSnapshot(QueryState->TxCtx->SnapshotHandle);
-                QueryState->TxCtx->SnapshotHandle = IKqpGateway::TKqpSnapshotHandle();
-            }
-            AcquireMvccSnapshot();
-            return;
-        }
-
         // quick path
         if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId()) && !QueryState->CompileResult->NeedToSplit) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
@@ -1044,6 +1033,7 @@ public:
     }
 
     void AcquireMvccSnapshot() {
+        Cerr << "TEST >> " << SelfId() << " --- " << "AcquireMvccSnapshot" << Endl;
         AcquireSnapshotSpan = NWilson::TSpan(TWilsonKqp::SessionAcquireSnapshot, QueryState->KqpSessionSpan.GetTraceId(),
             "SessionActor.AcquireMvccSnapshot");
         STLOG_D("Acquire mvcc snapshot",
@@ -1164,6 +1154,8 @@ public:
                         return NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RO;
                     case NKikimrConfig::TTableServiceConfig::StaleRO:
                         return NKqpProto::ISOLATION_LEVEL_READ_STALE;
+                    case NKikimrConfig::TTableServiceConfig::ReadCommittedRW:
+                        return NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW;
                     default:
                         ythrow TRequestFail(Ydb::StatusIds::BAD_REQUEST)
                             << "Unknown DefaultTxMode";
@@ -1181,6 +1173,9 @@ public:
                     break;
                 case NKqpProto::ISOLATION_LEVEL_READ_STALE:
                     settings.mutable_stale_read_only();
+                    break;
+                case NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW:
+                    settings.mutable_read_committed_read_write();
                     break;
                 default:
                     ythrow TRequestFail(Ydb::StatusIds::BAD_REQUEST)
@@ -1211,7 +1206,7 @@ public:
                     }
                     QueryState->TxCtx = txCtx;
                     QueryState->QueryData = std::make_shared<TQueryData>(QueryState->TxCtx->TxAlloc);
-                    if (hasTxControl) {
+                    if (hasTxControl && QueryState->TxId.GetValue() != TTxId()) {
                         QueryState->TxId.SetValue(txId);
                     }
                     break;

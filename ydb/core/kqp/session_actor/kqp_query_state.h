@@ -431,6 +431,11 @@ public:
             return true;
         }
 
+        if (TxCtx->EffectiveIsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) {
+            // Read Committed transactions can't be committed with changes
+            return false;
+        }
+
         if (TxCtx->HasOlapTable) {
             // Olap sink results can't be committed with changes
             return false;
