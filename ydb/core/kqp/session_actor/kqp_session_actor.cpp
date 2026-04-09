@@ -703,6 +703,8 @@ public:
 
         Become(&TKqpSessionActor::ExecuteState);
 
+        EnsureTxContextForCompilation();
+
         // quick path
         if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId()) && !QueryState->CompileResult->NeedToSplit) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
@@ -1188,6 +1190,25 @@ public:
         control.set_commit_tx(QueryState->ProcessingLastStatement() && QueryState->ProcessingLastStatementPart());
         control.set_tx_id(QueryState->ImplicitTxId->GetValue().GetHumanStr());
         return control;
+    }
+
+    void EnsureTxContextForCompilation() {
+        if (QueryState->TxCtx) {
+            return;
+        }
+
+        if (!QueryState->HasTxControl()) {
+            return;
+        }
+
+        const auto& txControl = QueryState->GetTxControl();
+        if (txControl.tx_selector_case() == Ydb::Table::TransactionControl::kTxId) {
+            auto txId = TTxId::FromString(txControl.tx_id());
+            auto txCtx = Transactions.Find(txId);
+            if (txCtx) {
+                QueryState->TxCtx = txCtx;
+            }
+        }
     }
 
     bool PrepareQueryTransaction() {

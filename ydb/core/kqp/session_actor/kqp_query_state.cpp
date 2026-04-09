@@ -284,10 +284,9 @@ std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildCompileRequest(s
     settings.RuntimeParameterSizeLimitSatisfied = RuntimeParameterSizeLimitSatisfied;
 
     bool keepInCache = false;
-    bool perStatementResult = true;
-    TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
-
     auto isolationLevel = GetIsolationLevel();
+    bool perStatementResult = isolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW || HasImplicitTx();
+    TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
 
     switch (GetAction()) {
         case NKikimrKqp::QUERY_ACTION_EXECUTE:
@@ -397,7 +396,8 @@ std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildCompileSplittedR
     settings.RuntimeParameterSizeLimitSatisfied = RuntimeParameterSizeLimitSatisfied;
     TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
 
-    auto isolationLevel = GetIsolationLevel();
+    const auto isolationLevel = GetIsolationLevel();
+    AFL_ENSURE(isolationLevel == NKqpProto::ISOLATION_LEVEL_UNDEFINED);
 
     switch (GetAction()) {
         case NKikimrKqp::QUERY_ACTION_EXECUTE:
@@ -413,7 +413,7 @@ std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildCompileSplittedR
         compileDeadline = Min(compileDeadline, QueryDeadlines.CancelAt);
     }
 
-    const bool perStatementResult = !HasTxControl() && GetAction() == NKikimrKqp::QUERY_ACTION_EXECUTE;
+    const bool perStatementResult = (!HasTxControl() && GetAction() == NKikimrKqp::QUERY_ACTION_EXECUTE);
 
     TMaybe<TQueryAst> statementAst;
     if (!Statements.empty()) {
@@ -641,6 +641,11 @@ NKqpProto::EIsolationLevel TKqpQueryState::GetIsolationLevel() const {
                 break;
         }
     }
+
+    if (isolationLevel == NKqpProto::ISOLATION_LEVEL_UNDEFINED && PreparedQuery) {
+        isolationLevel = PreparedQuery->GetPhysicalQuery().GetDefaultTxMode();
+    }
+
     return isolationLevel;
 }
 

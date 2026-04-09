@@ -29,7 +29,6 @@ public:
         if (FastSnapshotExpiration) {
             settings.SetKeepSnapshotTimeout(TDuration::Seconds(1));
         }
-        settings.AppConfig.MutableTableServiceConfig()->SetEnableAstCache(true);
 
         Setup(settings);
 
