@@ -533,6 +533,8 @@ public:
         return RequestEv->GetTxControl();
     }
 
+    NKqpProto::EIsolationLevel GetIsolationLevel() const;
+
     bool ProcessingLastStatement() const {
         return CurrentStatementId + 1 >= Statements.size();
     }

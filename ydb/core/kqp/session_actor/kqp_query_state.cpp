@@ -287,36 +287,7 @@ std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildCompileRequest(s
     bool perStatementResult = true;
     TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
 
-    auto isolationLevel = NKqpProto::ISOLATION_LEVEL_UNDEFINED;
-    if (TxCtx && TxCtx->EffectiveIsolationLevel.Defined()) {
-        isolationLevel = *TxCtx->EffectiveIsolationLevel;
-    } else if (HasTxControl() && GetTxControl().has_begin_tx()) {
-        const auto& txSettings = GetTxControl().begin_tx();
-        switch (txSettings.tx_mode_case()) {
-            case Ydb::Table::TransactionSettings::kSerializableReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SERIALIZABLE;
-                break;
-            case Ydb::Table::TransactionSettings::kOnlineReadOnly:
-                isolationLevel = txSettings.online_read_only().allow_inconsistent_reads()
-                    ? NKqpProto::ISOLATION_LEVEL_INCONSISTENT_ONLINE_RO
-                    : NKqpProto::ISOLATION_LEVEL_ONLINE_RO;
-                break;
-            case Ydb::Table::TransactionSettings::kStaleReadOnly:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_STALE;
-                break;
-            case Ydb::Table::TransactionSettings::kSnapshotReadOnly:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RO;
-                break;
-            case Ydb::Table::TransactionSettings::kSnapshotReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RW;
-                break;
-            case Ydb::Table::TransactionSettings::kReadCommittedReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW;
-                break;
-            case Ydb::Table::TransactionSettings::TX_MODE_NOT_SET:
-                break;
-        }
-    }
+    auto isolationLevel = GetIsolationLevel();
 
     switch (GetAction()) {
         case NKikimrKqp::QUERY_ACTION_EXECUTE:
@@ -377,36 +348,7 @@ std::unique_ptr<TEvKqp::TEvRecompileRequest> TKqpQueryState::BuildReCompileReque
 
     TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
 
-    auto isolationLevel = NKqpProto::ISOLATION_LEVEL_UNDEFINED;
-    if (TxCtx && TxCtx->EffectiveIsolationLevel.Defined()) {
-        isolationLevel = *TxCtx->EffectiveIsolationLevel;
-    } else if (HasTxControl() && GetTxControl().has_begin_tx()) {
-        const auto& txSettings = GetTxControl().begin_tx();
-        switch (txSettings.tx_mode_case()) {
-            case Ydb::Table::TransactionSettings::kSerializableReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SERIALIZABLE;
-                break;
-            case Ydb::Table::TransactionSettings::kOnlineReadOnly:
-                isolationLevel = txSettings.online_read_only().allow_inconsistent_reads()
-                    ? NKqpProto::ISOLATION_LEVEL_INCONSISTENT_ONLINE_RO
-                    : NKqpProto::ISOLATION_LEVEL_ONLINE_RO;
-                break;
-            case Ydb::Table::TransactionSettings::kStaleReadOnly:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_STALE;
-                break;
-            case Ydb::Table::TransactionSettings::kSnapshotReadOnly:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RO;
-                break;
-            case Ydb::Table::TransactionSettings::kSnapshotReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RW;
-                break;
-            case Ydb::Table::TransactionSettings::kReadCommittedReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW;
-                break;
-            case Ydb::Table::TransactionSettings::TX_MODE_NOT_SET:
-                break;
-        }
-    }
+    auto isolationLevel = GetIsolationLevel();
 
     switch (GetAction()) {
         case NKikimrKqp::QUERY_ACTION_EXPLAIN:
@@ -455,36 +397,7 @@ std::unique_ptr<TEvKqp::TEvCompileRequest> TKqpQueryState::BuildCompileSplittedR
     settings.RuntimeParameterSizeLimitSatisfied = RuntimeParameterSizeLimitSatisfied;
     TGUCSettings gUCSettings = gUCSettingsPtr ? *gUCSettingsPtr : TGUCSettings();
 
-    auto isolationLevel = NKqpProto::ISOLATION_LEVEL_UNDEFINED;
-    if (TxCtx && TxCtx->EffectiveIsolationLevel.Defined()) {
-        isolationLevel = *TxCtx->EffectiveIsolationLevel;
-    } else if (HasTxControl() && GetTxControl().has_begin_tx()) {
-        const auto& txSettings = GetTxControl().begin_tx();
-        switch (txSettings.tx_mode_case()) {
-            case Ydb::Table::TransactionSettings::kSerializableReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SERIALIZABLE;
-                break;
-            case Ydb::Table::TransactionSettings::kOnlineReadOnly:
-                isolationLevel = txSettings.online_read_only().allow_inconsistent_reads()
-                    ? NKqpProto::ISOLATION_LEVEL_INCONSISTENT_ONLINE_RO
-                    : NKqpProto::ISOLATION_LEVEL_ONLINE_RO;
-                break;
-            case Ydb::Table::TransactionSettings::kStaleReadOnly:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_STALE;
-                break;
-            case Ydb::Table::TransactionSettings::kSnapshotReadOnly:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RO;
-                break;
-            case Ydb::Table::TransactionSettings::kSnapshotReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RW;
-                break;
-            case Ydb::Table::TransactionSettings::kReadCommittedReadWrite:
-                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW;
-                break;
-            case Ydb::Table::TransactionSettings::TX_MODE_NOT_SET:
-                break;
-        }
-    }
+    auto isolationLevel = GetIsolationLevel();
 
     switch (GetAction()) {
         case NKikimrKqp::QUERY_ACTION_EXECUTE:
@@ -695,6 +608,40 @@ bool TKqpQueryState::HasImplicitTx() const {
     }
 
     return true;
+}
+
+NKqpProto::EIsolationLevel TKqpQueryState::GetIsolationLevel() const {
+    auto isolationLevel = NKqpProto::ISOLATION_LEVEL_UNDEFINED;
+    if (TxCtx && TxCtx->EffectiveIsolationLevel.Defined()) {
+        isolationLevel = *TxCtx->EffectiveIsolationLevel;
+    } else if (HasTxControl() && GetTxControl().has_begin_tx()) {
+        const auto& txSettings = GetTxControl().begin_tx();
+        switch (txSettings.tx_mode_case()) {
+            case Ydb::Table::TransactionSettings::kSerializableReadWrite:
+                isolationLevel = NKqpProto::ISOLATION_LEVEL_SERIALIZABLE;
+                break;
+            case Ydb::Table::TransactionSettings::kOnlineReadOnly:
+                isolationLevel = txSettings.online_read_only().allow_inconsistent_reads()
+                    ? NKqpProto::ISOLATION_LEVEL_INCONSISTENT_ONLINE_RO
+                    : NKqpProto::ISOLATION_LEVEL_ONLINE_RO;
+                break;
+            case Ydb::Table::TransactionSettings::kStaleReadOnly:
+                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_STALE;
+                break;
+            case Ydb::Table::TransactionSettings::kSnapshotReadOnly:
+                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RO;
+                break;
+            case Ydb::Table::TransactionSettings::kSnapshotReadWrite:
+                isolationLevel = NKqpProto::ISOLATION_LEVEL_SNAPSHOT_RW;
+                break;
+            case Ydb::Table::TransactionSettings::kReadCommittedReadWrite:
+                isolationLevel = NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW;
+                break;
+            case Ydb::Table::TransactionSettings::TX_MODE_NOT_SET:
+                break;
+        }
+    }
+    return isolationLevel;
 }
 
 }
