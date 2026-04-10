@@ -84,6 +84,7 @@ public:
         , EnforcedSqlVersion(tableServiceConfig.GetEnforceSqlVersionV1())
         , EnableNewRBO(tableServiceConfig.GetEnableNewRBO())
         , EnableFallbackToYqlOptimizer(tableServiceConfig.GetEnableFallbackToYqlOptimizer())
+        , IsolationLevel(isolationLevel)
     {
         Config = BuildConfiguration(tableServiceConfig);
         PerStatementResult = (isolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) || (perStatementResult && Config->GetEnablePerStatementQueryExecution());
@@ -355,13 +356,14 @@ private:
 
         KqpHost = CreateKqpHost(Gateway, QueryId.Cluster, QueryId.Database, Config, ModuleResolverState->ModuleResolver,
             FederatedQuerySetup, UserToken, GUCSettings, QueryServiceConfig, ApplicationName, AppData(ctx)->FunctionRegistry,
-            false, false, std::move(TempTablesState), nullptr, SplitCtx.get(), UserRequestContext);
+            false, false, std::move(TempTablesState), nullptr, SplitCtx.get(), UserRequestContext, IsolationLevel);
 
         IKqpHost::TPrepareSettings prepareSettings;
         prepareSettings.DocumentApiRestricted = QueryId.Settings.DocumentApiRestricted;
         prepareSettings.IsInternalCall = QueryId.Settings.IsInternalCall;
         prepareSettings.RuntimeParameterSizeLimit = QueryId.Settings.RuntimeParameterSizeLimit;
         prepareSettings.RuntimeParameterSizeLimitSatisfied = QueryId.Settings.RuntimeParameterSizeLimitSatisfied;
+        prepareSettings.IsolationLevel = IsolationLevel;
 
         switch (QueryId.Settings.Syntax) {
             case Ydb::Query::Syntax::SYNTAX_YQL_V1:
@@ -737,6 +739,7 @@ private:
     bool EnforcedSqlVersion;
     bool EnableNewRBO;
     bool EnableFallbackToYqlOptimizer;
+    NKqpProto::EIsolationLevel IsolationLevel;
 };
 
 IActor* CreateKqpCompileActor(const TActorId& owner, const TKqpSettings::TConstPtr& kqpSettings,

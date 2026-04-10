@@ -727,8 +727,11 @@ THashSet<TStringBuf> GetUpdateColumns(const TKikimrTableDescription& tableData, 
 }
 
 TExprBase BuildUpdateTable(const TKiUpdateTable& update, const TKikimrTableDescription& tableData,
-    bool withSystemColumns, TExprContext& ctx)
+    bool withSystemColumns, TExprContext& ctx, TKqpOptimizeContext& kqpCtx)
 {
+    YQL_ENSURE(kqpCtx.IsolationLevel != NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW,
+        "UPDATE WHERE is not supported with READ_COMMITTED_RW isolation level");
+
     auto rowsToUpdate = BuildRowsToUpdate(tableData, withSystemColumns, update.Filter(), update.IsBatch(), update.Pos(), ctx);
 
     auto updateColumns = GetUpdateColumns(tableData, update.Update());
@@ -1090,7 +1093,7 @@ TExprNode::TPtr HandleUpdateTable(const TKiUpdateTable& update, TExprContext& ct
     if (HasIndexesToWrite(tableData)) {
         return BuildUpdateTableWithIndex(update, tableData, withSystemColumns, ctx, kqpCtx).Ptr();
     } else {
-        return BuildUpdateTable(update, tableData, withSystemColumns, ctx).Ptr();
+        return BuildUpdateTable(update, tableData, withSystemColumns, ctx, kqpCtx).Ptr();
     }
 }
 

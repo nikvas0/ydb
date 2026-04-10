@@ -318,6 +318,28 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
         tester.SetIsOlap(false);
         tester.Execute();
     }
+
+    class TUpdateWhereReadCommittedRWNotSupported : public TTableDataModificationTester {
+    protected:
+        void DoExecute() override {
+            auto client = Kikimr->GetQueryClient();
+            auto session = client.GetSession().GetValueSync().GetSession();
+
+            auto result = session.ExecuteQuery(Q_(R"(
+                UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul"
+            )"), TTxControl::BeginTx(TTxSettings::ReadCommittedRW()).CommitTx()).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::INTERNAL_ERROR, result.GetIssues().ToString());
+            UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "UPDATE WHERE is not supported with READ_COMMITTED_RW");
+        }
+    };
+
+    Y_UNIT_TEST(TUpdateWhereReadCommittedRWNotSupported) {
+        TUpdateWhereReadCommittedRWNotSupported tester;
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(true);
+        tester.Execute();
+    }
 }
 
 } // namespace NKqp
