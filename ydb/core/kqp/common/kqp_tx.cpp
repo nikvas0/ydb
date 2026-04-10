@@ -56,7 +56,8 @@ bool NeedSnapshot(const TKqpTransactionContext& txCtx, const NYql::TKikimrConfig
         return false;
 
     if (*txCtx.EffectiveIsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) {
-        // TODO: avoid snapshot for some queries
+        // In Read Committed mode, each query should see the latest committed data,
+        // so we need a fresh snapshot for each query, not a cached one.
         return true;
     }
 

@@ -1,5 +1,6 @@
 #include "kqp_sink_common.h"
 
+#include <ydb/core/kqp/rm_service/kqp_snapshot_manager.h>
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
 #include <ydb/core/testlib/common_helper.h>
 #include <ydb/core/tx/columnshard/hooks/abstract/abstract.h>
@@ -18,15 +19,56 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
     class TReadSeesLastCommitted : public TTableDataModificationTester {
     protected:
         void DoExecute() override {
+            auto& runtime = *Kikimr->GetTestServer().GetRuntime();
+
             auto client = Kikimr->GetQueryClient();
-            auto session1 = client.GetSession().GetValueSync().GetSession();
-            auto session2 = client.GetSession().GetValueSync().GetSession();
+            auto session1 = Kikimr->RunCall([&] { return client.GetSession().GetValueSync().GetSession(); });
+            auto session2 = Kikimr->RunCall([&] { return client.GetSession().GetValueSync().GetSession(); });
+
+            size_t evWriteCounter = 0;
+            size_t evReadCounter = 0;
+            size_t evCreateSnapshotCounter = 0;
+
+            auto grab = [&](TAutoPtr<IEventHandle> &ev) -> auto {
+                if (ev->GetTypeRewrite() == NKikimr::NEvents::TDataEvents::TEvWrite::EventType) {
+                    ++evWriteCounter;
+                } else if (ev->GetTypeRewrite() == NKikimr::TEvDataShard::TEvRead::EventType) {
+                    ++evReadCounter;
+                    auto* evRead = ev->Get<NKikimr::TEvDataShard::TEvRead>();
+                    auto& snapshot = evRead->Record.GetSnapshot();
+                    UNIT_ASSERT(snapshot.GetStep() != 0);
+                    UNIT_ASSERT(snapshot.GetTxId() != 0);
+                } else if (ev->GetTypeRewrite() == NKikimr::NKqp::TEvKqpSnapshot::TEvCreateSnapshotRequest::EventType) {
+                    ++evCreateSnapshotCounter;
+                }
+                return TTestActorRuntime::EEventAction::PROCESS;
+            };
+
+            auto saveObserver = runtime.SetObserverFunc(grab);
+            Y_DEFER {
+                runtime.SetObserverFunc(saveObserver);
+            };
 
             // Session1 starts a Read Committed transaction and reads initial data
             {
-                auto result = session1.ExecuteQuery(Q_(R"(
-                    SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
-                )"), TTxControl::BeginTx(TTxSettings::ReadCommittedRW())).ExtractValueSync();
+                //TEST: TEvCreateSnapshotRequest, EvRead
+                auto future1 = Kikimr->RunInThreadPool([&] {
+                    return session1.ExecuteQuery(Q_(R"(
+                        SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
+                    )"), TTxControl::BeginTx(TTxSettings::ReadCommittedRW())).ExtractValueSync();
+                });
+
+                {
+                    TDispatchOptions opts;
+                    opts.FinalEvents.emplace_back([&](IEventHandle&) {
+                        return evCreateSnapshotCounter >= 1 && evReadCounter >= 1;
+                    });
+                    runtime.DispatchEvents(opts);
+                    UNIT_ASSERT(evCreateSnapshotCounter >= 1);
+                    UNIT_ASSERT(evReadCounter >= 1);
+                }
+
+                auto result = runtime.WaitFuture(future1);
                 UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
                 CompareYson(R"([[[300u];["None"];1u;"Paul"]])", FormatResultSetYson(result.GetResultSet(0)));
                 auto tx1 = result.GetTransaction();
@@ -34,38 +76,79 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
 
                 // Session2 commits changes to the same data
                 {
-                    auto result2 = session2.ExecuteQuery(Q_(R"(
-                        UPSERT INTO `/Root/Test` (Group, Name, Comment, Amount)
-                        VALUES (1U, "Paul", "Changed Other", 100u);
-                    )"), TTxControl::BeginTx(TTxSettings::SnapshotRW()).CommitTx()).ExtractValueSync();
+                    //TEST: EvWrite
+                    auto future2 = Kikimr->RunInThreadPool([&] {
+                        return session2.ExecuteQuery(Q_(R"(
+                            UPSERT INTO `/Root/Test` (Group, Name, Comment, Amount)
+                            VALUES (1U, "Paul", "Changed Other", 100u);
+                        )"), TTxControl::BeginTx(TTxSettings::SnapshotRW()).CommitTx()).ExtractValueSync();
+                    });
+
+                    {
+                        TDispatchOptions opts2;
+                        opts2.FinalEvents.emplace_back([&](IEventHandle&) {
+                            return evWriteCounter >= 1;
+                        });
+                        runtime.DispatchEvents(opts2);
+                        UNIT_ASSERT(evWriteCounter >= 1);
+                    }
+
+                    auto result2 = runtime.WaitFuture(future2);
                     UNIT_ASSERT_VALUES_EQUAL_C(result2.GetStatus(), EStatus::SUCCESS, result2.GetIssues().ToString());
                 }
 
                 // Session1 reads again within the same transaction and should see the committed changes
                 // This demonstrates that Read Committed sees the latest committed data
                 {
-                    auto result2 = session1.ExecuteQuery(Q_(R"(
-                        SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
+                    Cerr << "TEST >> READ 2 --- " << Endl;
+                    //TEST: TEvCreateSnapshotRequest, EvRead, TEvCreateSnapshotRequest, EvRead
+                    size_t evCreateSnapshotBefore = evCreateSnapshotCounter;
+                    size_t evReadBefore = evReadCounter;
 
-                        SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
-                    )"), TTxControl::Tx(*tx1)).ExtractValueSync();
+                    auto future3 = Kikimr->RunInThreadPool([&] {
+                        return session1.ExecuteQuery(Q_(R"(
+                            SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
+
+                            SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
+                        )"), TTxControl::Tx(*tx1)).ExtractValueSync();
+                    });
+
+                    {
+                        TDispatchOptions opts3;
+                        opts3.FinalEvents.emplace_back([&](IEventHandle&) {
+                            return (evCreateSnapshotCounter - evCreateSnapshotBefore) >= 2 && (evReadCounter - evReadBefore) >= 2;
+                        });
+                        runtime.DispatchEvents(opts3);
+                        UNIT_ASSERT((evCreateSnapshotCounter - evCreateSnapshotBefore) >= 2);
+                        UNIT_ASSERT((evReadCounter - evReadBefore) >= 2);
+                    }
+
+                    auto result2 = runtime.WaitFuture(future3);
                     UNIT_ASSERT_VALUES_EQUAL_C(result2.GetStatus(), EStatus::SUCCESS, result2.GetIssues().ToString());
                     CompareYson(R"([[[100u];["Changed Other"];1u;"Paul"]])", FormatResultSetYson(result2.GetResultSet(0)));
                     CompareYson(R"([[[100u];["Changed Other"];1u;"Paul"]])", FormatResultSetYson(result2.GetResultSet(1)));
+
+                    Cerr << "TEST >> READ 2 --- FINISH " << Endl;
                 }
 
                 // Commit the transaction
                 {
-                    auto result2 = tx1->Commit().ExtractValueSync();
+                    auto future4 = Kikimr->RunInThreadPool([&] {
+                        return tx1->Commit().ExtractValueSync();
+                    });
+                    auto result2 = runtime.WaitFuture(future4);
                     UNIT_ASSERT_VALUES_EQUAL_C(result2.GetStatus(), EStatus::SUCCESS, result2.GetIssues().ToString());
                 }
             }
 
             // Verify the final state
             {
-                auto result = session1.ExecuteQuery(Q_(R"(
-                    SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
-                )"), TTxControl::BeginTx(TTxSettings::SnapshotRW()).CommitTx()).ExtractValueSync();
+                auto future5 = Kikimr->RunInThreadPool([&] {
+                    return session1.ExecuteQuery(Q_(R"(
+                        SELECT * FROM `/Root/Test` WHERE Name == "Paul" ORDER BY Group, Name;
+                    )"), TTxControl::BeginTx(TTxSettings::ReadCommittedRW()).CommitTx()).ExtractValueSync();
+                });
+                auto result = runtime.WaitFuture(future5);
                 UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
                 CompareYson(R"([[[100u];["Changed Other"];1u;"Paul"]])", FormatResultSetYson(result.GetResultSet(0)));
             }
@@ -75,6 +158,7 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
     Y_UNIT_TEST(TReadSeesLastCommittedOltp) {
         TReadSeesLastCommitted tester;
         tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
         tester.Execute();
     }
 

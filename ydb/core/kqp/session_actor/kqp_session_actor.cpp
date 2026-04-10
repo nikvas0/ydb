@@ -830,6 +830,8 @@ public:
     }
 
     void CompileStatement() {
+
+        Cerr << "TEST >> Compile STATEMENT --- " << Endl;
         // quick path
         if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId()) && !QueryState->CompileResult->NeedToSplit) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
@@ -1000,10 +1002,12 @@ public:
             co_return;
         }
 
+        Cerr << "TET >> CHECK IF NEED SNAPSHOT " << Endl;
         if (QueryState->NeedPersistentSnapshot()) {
             AcquirePersistentSnapshot();
             co_return;
         } else if (QueryState->NeedSnapshot(*Config)) {
+            Cerr << "TET >> GET SNAPSHOT " << Endl;
             AcquireMvccSnapshot();
             co_return;
         }
@@ -1088,6 +1092,7 @@ public:
             return;
         }
         AcquireSnapshotSpan.EndOk();
+        Cerr << "TEST >> " << "UPDATED SNAPSHOT" << Endl;
         QueryState->TxCtx->SnapshotHandle.Snapshot = response->Snapshot;
 
         // Can reply inside (in case of deferred-only transactions) and become ReadyState
