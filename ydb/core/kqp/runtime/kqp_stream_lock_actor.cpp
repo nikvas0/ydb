@@ -36,30 +36,49 @@ struct TInFlightLockRequest {
 
 } // namespace
 
-class TStreamLockActor : public TActorBootstrapped<TStreamLockActor>, public NYql::NDq::IDqComputeActorAsyncOutput {
+class TStreamLockActor : public TActorBootstrapped<TStreamLockActor>, public NYql::NDq::IDqComputeActorAsyncInput {
 public:
     using TBase = TActorBootstrapped<TStreamLockActor>;
 
     TStreamLockActor(TKqpStreamLockSettings&& settings,
-                     NYql::NDq::IDqAsyncIoFactory::TSinkArguments&& args,
+                     NYql::NDq::IDqAsyncIoFactory::TInputTransformArguments&& args,
                      TIntrusivePtr<TKqpCounters> counters)
         : Settings(std::move(settings))
-        , OutputIndex(args.OutputIndex)
-        , Callbacks(args.Callback)
+        , InputIndex(args.InputIndex)
+        , Input(args.TransformInput)
+        , ComputeActorId(args.ComputeActorId)
         , TypeEnv(args.TypeEnv)
         , Alloc(args.Alloc)
         , Counters(counters)
         , TxId(args.TxId)
         , StatsLevel(args.StatsLevel)
         , TraceId(args.TraceId)
-        , LogPrefix(TStringBuilder() << "StreamLockActor, outputIndex: " << args.OutputIndex << ", task: " << args.TaskId)
+        , LogPrefix(TStringBuilder() << "StreamLockActor, inputIndex: " << args.InputIndex << ", CA Id: " << args.ComputeActorId)
     {
-        EgressStats.Level = StatsLevel;
+        IngressStats.Level = StatsLevel;
     }
 
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
         ResolveTableShards();
+        Become(&TStreamLockActor::StateFunc);
+    }
+
+    STFUNC(StateFunc) {
+        try {
+            switch (ev->GetTypeRewrite()) {
+                hFunc(TEvTxProxySchemeCache::TEvResolveKeySetResult, HandleResolve);
+                hFunc(NEvents::TDataEvents::TEvLockRowsResult, HandleLockResult);
+                hFunc(TEvPipeCache::TEvDeliveryProblem, HandleDeliveryProblem);
+                default:
+                    RuntimeError(TStringBuilder() << "Unexpected event: " << ev->GetTypeRewrite(),
+                        NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+            }
+        } catch (const NKikimr::TMemoryLimitExceededException& e) {
+            RuntimeError("Memory limit exceeded at stream lock", NYql::NDqProto::StatusIds::PRECONDITION_FAILED);
+        } catch (const yexception& e) {
+            RuntimeError(e.what(), NYql::NDqProto::StatusIds::INTERNAL_ERROR);
+        }
     }
 
     void PassAway() override {
@@ -70,32 +89,40 @@ public:
     }
 
 private:
-    void CommitState(const NYql::NDqProto::TCheckpoint&) final {}
-    void LoadState(const NYql::NDq::TSinkState&) final {}
-
-    ui64 GetOutputIndex() const final {
-        return OutputIndex;
+    ui64 GetInputIndex() const final {
+        return InputIndex;
     }
 
-    const NYql::NDq::TDqAsyncStats& GetEgressStats() const final {
-        return EgressStats;
+    const NYql::NDq::TDqAsyncStats& GetIngressStats() const final {
+        return IngressStats;
     }
 
-    i64 GetFreeSpace() const final {
-        return std::numeric_limits<i64>::max();
+    i64 GetAsyncInputData(NKikimr::NMiniKQL::TUnboxedValueBatch& batch, TMaybe<TInstant>&, bool& finished, i64 freeSpace) final;
+
+    void SaveState(const NYql::NDqProto::TCheckpoint& checkpoint, NYql::NDq::TSourceState& state) final {
+        Y_UNUSED(checkpoint);
+        Y_UNUSED(state);
     }
 
-    void SendData(NMiniKQL::TUnboxedValueBatch&& batch, i64 dataSize,
-        const TMaybe<NYql::NDqProto::TCheckpoint>& checkpoint, bool finished) final;
+    void LoadState(const NYql::NDq::TSourceState& state) final {
+        Y_UNUSED(state);
+    }
+
+    void CommitState(const NYql::NDqProto::TCheckpoint& checkpoint) final {
+        Y_UNUSED(checkpoint);
+    }
 
     void HandleResolve(TEvTxProxySchemeCache::TEvResolveKeySetResult::TPtr& ev);
     void HandleLockResult(NEvents::TDataEvents::TEvLockRowsResult::TPtr& ev);
     void HandleDeliveryProblem(TEvPipeCache::TEvDeliveryProblem::TPtr& ev);
 
     void ResolveTableShards();
+    void FetchInputRows();
+    void ProcessInputRows();
     void SendLockRequests();
     void OutputResults(ui64 requestId, const NEvents::TDataEvents::TEvLockRowsResult& result);
     void CheckCompletion();
+    void NotifyCA();
 
     void RuntimeError(const TString& message, NYql::NDqProto::StatusIds::StatusCode statusCode, const NYql::TIssues& subIssues = {});
 
@@ -104,8 +131,9 @@ private:
     }
 
     TKqpStreamLockSettings Settings;
-    const ui64 OutputIndex;
-    NYql::NDq::IDqComputeActorAsyncOutput::ICallbacks* Callbacks = nullptr;
+    const ui64 InputIndex;
+    NUdf::TUnboxedValue Input;
+    const TActorId ComputeActorId;
     const NMiniKQL::TTypeEnvironment& TypeEnv;
     std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
     TIntrusivePtr<TKqpCounters> Counters;
@@ -114,7 +142,7 @@ private:
     const NWilson::TTraceId TraceId;
     TString LogPrefix;
 
-    NYql::NDq::TDqAsyncStats EgressStats;
+    NYql::NDq::TDqAsyncStats IngressStats;
 
     const TActorId PipeCacheId = MainPipeCacheId;
     std::shared_ptr<const TVector<TKeyDesc::TPartitionInfo>> Partitioning;
@@ -131,23 +159,58 @@ private:
     ui64 NextRequestId = 1;
     bool InputFinished = false;
     bool ResolveCompleted = false;
+    NUdf::EFetchStatus LastFetchStatus = NUdf::EFetchStatus::Ok;
+    bool HasPendingResults = false;
 };
 
-void TStreamLockActor::SendData(NMiniKQL::TUnboxedValueBatch&& batch, i64 dataSize,
-    const TMaybe<NYql::NDqProto::TCheckpoint>& checkpoint, bool finished)
-{
-    Y_UNUSED(dataSize);
-    Y_UNUSED(checkpoint);
+i64 TStreamLockActor::GetAsyncInputData(NKikimr::NMiniKQL::TUnboxedValueBatch& batch, TMaybe<TInstant>&, bool& finished, i64) {
+    YQL_ENSURE(!batch.IsWide(), "Wide stream is not supported");
 
-    if (batch.empty() && !finished) {
+    if (ResolveShardsInProgress) {
+        finished = false;
+        return 0;
+    }
+
+    FetchInputRows();
+
+    if (Partitioning) {
+        ProcessInputRows();
+    }
+
+    HasPendingResults = false;
+    for (const auto& [requestId, request] : InFlightRequests) {
+        Y_UNUSED(requestId);
+        if (!request.Keys.empty()) {
+            HasPendingResults = true;
+            break;
+        }
+    }
+
+    if (HasPendingResults || !PendingRows.empty()) {
+        NotifyCA();
+    }
+
+    finished = InputFinished && InFlightRequests.empty() && PendingRows.empty();
+
+    CA_LOG_D("Returned data, finished: " << finished);
+    return 0;
+}
+
+void TStreamLockActor::FetchInputRows() {
+    auto guard = BindAllocator();
+
+    NUdf::TUnboxedValue row;
+
+    YQL_ENSURE(!Input.IsInvalid());
+    if (Input.IsFinish() || !Input.HasValue()) {
+        LastFetchStatus = NUdf::EFetchStatus::Finish;
+        InputFinished = true;
         return;
     }
 
-    auto guard = BindAllocator();
-
-    if (!batch.empty()) {
+    while ((LastFetchStatus = Input.Fetch(row)) == NUdf::EFetchStatus::Ok) {
         TRowBuffer buffer;
-        buffer.Batch = std::move(batch);
+        buffer.Batch.emplace_back(std::move(row));
 
         buffer.KeyColumnIds.reserve(Settings.KeyColumns.size());
         buffer.KeyColumnTypes.reserve(Settings.KeyColumns.size());
@@ -161,14 +224,10 @@ void TStreamLockActor::SendData(NMiniKQL::TUnboxedValueBatch&& batch, i64 dataSi
 
         PendingRows.push_back(std::move(buffer));
     }
+}
 
-    InputFinished = finished;
-
-    if (ResolveCompleted && !PendingRows.empty()) {
-        SendLockRequests();
-    }
-
-    CheckCompletion();
+void TStreamLockActor::NotifyCA() {
+    Send(ComputeActorId, new TEvNewAsyncInputDataArrived(InputIndex));
 }
 
 void TStreamLockActor::ResolveTableShards() {
@@ -221,11 +280,15 @@ void TStreamLockActor::HandleResolve(TEvTxProxySchemeCache::TEvResolveKeySetResu
 
     ResolveCompleted = true;
 
-    if (!PendingRows.empty()) {
-        SendLockRequests();
+    NotifyCA();
+}
+
+void TStreamLockActor::ProcessInputRows() {
+    if (!Partitioning || PendingRows.empty()) {
+        return;
     }
 
-    CheckCompletion();
+    SendLockRequests();
 }
 
 void TStreamLockActor::SendLockRequests() {
@@ -364,9 +427,7 @@ void TStreamLockActor::OutputResults(ui64 requestId, const NEvents::TDataEvents:
     Y_UNUSED(requestId);
     Y_UNUSED(result);
 
-    if (Callbacks) {
-        Callbacks->ResumeExecution();
-    }
+    NotifyCA();
 }
 
 void TStreamLockActor::HandleDeliveryProblem(TEvPipeCache::TEvDeliveryProblem::TPtr& ev) {
@@ -383,9 +444,7 @@ void TStreamLockActor::HandleDeliveryProblem(TEvPipeCache::TEvDeliveryProblem::T
 
 void TStreamLockActor::CheckCompletion() {
     if (InputFinished && InFlightRequests.empty() && PendingRows.empty()) {
-        if (Callbacks) {
-            Callbacks->OnAsyncOutputFinished(GetOutputIndex());
-        }
+        NotifyCA();
     }
 }
 
@@ -398,13 +457,11 @@ void TStreamLockActor::RuntimeError(const TString& message, NYql::NDqProto::Stat
     NYql::TIssues issues;
     issues.AddIssue(std::move(issue));
 
-    if (Callbacks) {
-        Callbacks->OnAsyncOutputError(GetOutputIndex(), issues, statusCode);
-    }
+    Send(ComputeActorId, new TEvAsyncInputError(InputIndex, issues, statusCode));
 }
 
-std::pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*> CreateKqpStreamLockActor(TKqpStreamLockSettings&& settings,
-                                  NYql::NDq::IDqAsyncIoFactory::TSinkArguments&& args,
+std::pair<NYql::NDq::IDqComputeActorAsyncInput*, NActors::IActor*> CreateKqpStreamLockActor(TKqpStreamLockSettings&& settings,
+                                  NYql::NDq::IDqAsyncIoFactory::TInputTransformArguments&& args,
                                   TIntrusivePtr<TKqpCounters> counters) {
     auto* actor = new TStreamLockActor(std::move(settings), std::move(args), counters);
     return {actor, actor};

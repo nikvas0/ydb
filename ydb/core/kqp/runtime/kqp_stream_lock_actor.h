@@ -19,8 +19,8 @@ struct TKqpStreamLockSettings {
     ui64 QuerySpanId = 0;
 };
 
-std::pair<NYql::NDq::IDqComputeActorAsyncOutput*, NActors::IActor*> CreateKqpStreamLockActor(TKqpStreamLockSettings&& settings,
-    NYql::NDq::IDqAsyncIoFactory::TSinkArguments&& args,
+std::pair<NYql::NDq::IDqComputeActorAsyncInput*, NActors::IActor*> CreateKqpStreamLockActor(TKqpStreamLockSettings&& settings,
+    NYql::NDq::IDqAsyncIoFactory::TInputTransformArguments&& args,
     TIntrusivePtr<TKqpCounters> counters);
 
 } // namespace NKqp
