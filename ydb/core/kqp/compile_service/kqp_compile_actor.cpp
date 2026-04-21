@@ -131,6 +131,10 @@ public:
             config->_KqpEnableSpilling = false;
         }
 
+        if (IsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) {
+            config->SetEnableIndexStreamWrite(true);
+        }
+
         config->FreezeDefaults();
 
         return config;

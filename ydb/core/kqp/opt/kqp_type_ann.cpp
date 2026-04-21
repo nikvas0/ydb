@@ -2114,7 +2114,19 @@ TStatus AnnotateStreamLookupConnection(const TExprNode::TPtr& node, TExprContext
 
     TCoNameValueTupleList settingsNode{node->ChildPtr(TKqpCnStreamLookup::idx_Settings)};
     auto settings = TKqpStreamLookupSettings::Parse(settingsNode);
-    if (settings.Strategy == EStreamLookupStrategyType::LookupRows
+
+    if (settings.Strategy == EStreamLookupStrategyType::LookupAndLockRows) {
+        if (!EnsureStructType(node->Pos(), *inputItemType, ctx)) {
+            return TStatus::Error;
+        }
+
+        auto rowType = GetReadTableRowType(ctx, tablesData, cluster, table.first, columns, withSystemColumns);
+        if (!rowType) {
+            return TStatus::Error;
+        }
+
+        node->SetTypeAnn(ctx.MakeType<TStreamExprType>(rowType));
+    } else if (settings.Strategy == EStreamLookupStrategyType::LookupRows
         || settings.Strategy == EStreamLookupStrategyType::LookupUniqueRows) {
 
         if (!EnsureStructType(node->Pos(), *inputItemType, ctx)) {

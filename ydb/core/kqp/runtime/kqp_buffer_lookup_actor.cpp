@@ -159,7 +159,7 @@ public:
             .LookupStrategy = NKqpProto::EStreamLookupStrategy::LOOKUP,
 
             .KeyColumns = {},
-            .LookupKeyColumns = {},
+            .InputColumns = {},
             .Columns = {},
         };
 
@@ -192,12 +192,18 @@ public:
 
         {
             AFL_ENSURE(lookupKeyPrefix <= keyColumns.size());
-            settings.LookupKeyColumns.reserve(lookupKeyPrefix);
+            settings.InputColumns.reserve(lookupKeyPrefix);
             for (size_t index = 0; index < lookupKeyPrefix; ++index) {
                 const auto& keyColumn = keyColumns.at(index);
-                auto columnIt = settings.KeyColumns.find(keyColumn.GetName());
-                YQL_ENSURE(columnIt != settings.KeyColumns.end());
-                settings.LookupKeyColumns.push_back(&columnIt->second);
+                NScheme::TTypeInfo typeInfo = NScheme::TypeInfoFromProto(keyColumn.GetTypeId(), keyColumn.GetTypeInfo());
+                settings.InputColumns.push_back(
+                    TSysTables::TTableColumnInfo{
+                        keyColumn.GetName(),
+                        keyColumn.GetId(),
+                        typeInfo,
+                        keyColumn.GetTypeInfo().GetPgTypeMod(),
+                    }
+                );
             }
         }
 

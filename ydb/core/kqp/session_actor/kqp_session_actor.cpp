@@ -986,6 +986,8 @@ public:
             co_return ReplyPrepareResult();
         }
 
+        Cerr << "COMPILED " << QueryState->CompileResult->PreparedQuery->GetPhysicalQuery().GetQueryAst() << Endl;
+
         if (QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_PREPARE) {
             co_return ReplyPrepareResult();
         }

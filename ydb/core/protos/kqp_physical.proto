@@ -295,6 +295,7 @@ enum EStreamLookupStrategy {
     JOIN = 2;
     SEMI_JOIN = 3;
     UNIQUE = 4;
+    LOOKUP_AND_LOCK = 5;
 };
 
 message TKqpPhyVectorTopK {
@@ -319,6 +320,7 @@ message TKqpPhyCnStreamLookup {
     uint32 AllowNullKeysPrefixSize = 9;
     bool IsTableImmutable = 10;
     TKqpPhyVectorTopK VectorTopK = 11;
+    repeated string InputColumns = 12;
 }
 
 message TKqpPhyCnVectorResolve {

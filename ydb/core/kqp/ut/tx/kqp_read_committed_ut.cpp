@@ -319,25 +319,82 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
         tester.Execute();
     }
 
-    class TUpdateWhereReadCommittedRWNotSupported : public TTableDataModificationTester {
+    class TUpdateWhereTakesLocks : public TTableDataModificationTester {
     protected:
         void DoExecute() override {
+            auto& runtime = *Kikimr->GetTestServer().GetRuntime();
+
+            size_t evLockCounter = 0;
+            size_t evLockResultCounter = 0;
+            size_t evReadCounter = 0;
+            size_t evWriteCounter = 0;
+
+            auto grab = [&](TAutoPtr<IEventHandle>& ev) -> auto {
+                if (ev->GetTypeRewrite() == NKikimr::NEvents::TDataEvents::TEvLockRows::EventType) {
+                    ++evLockCounter;
+                    auto* lockEv = ev->Get<NKikimr::NEvents::TDataEvents::TEvLockRows>();
+                    auto lockMode = lockEv->Record.GetLockMode();
+                    Cerr << "TEvLockRows LockMode: " << NKikimrDataEvents::ELockMode_Name(lockMode) << Endl;
+                    UNIT_ASSERT_VALUES_EQUAL(lockMode, NKikimrDataEvents::PESSIMISTIC_EXCLUSIVE);
+                } else if (ev->GetTypeRewrite() == NKikimr::NEvents::TDataEvents::TEvLockRowsResult::EventType) {
+                    ++evLockResultCounter;
+                } else if (ev->GetTypeRewrite() == NKikimr::TEvDataShard::TEvRead::EventType) {
+                    ++evReadCounter;
+                    auto* readEv = ev->Get<NKikimr::TEvDataShard::TEvRead>();
+                    auto lockMode = readEv->Record.GetLockMode();
+                    Cerr << "TEvRead LockMode: " << NKikimrDataEvents::ELockMode_Name(lockMode) << Endl;
+                    UNIT_ASSERT_VALUES_EQUAL(lockMode, NKikimrDataEvents::PESSIMISTIC_NONE);
+                } else if (ev->GetTypeRewrite() == NKikimr::NEvents::TDataEvents::TEvWrite::EventType) {
+                    ++evWriteCounter;
+                    auto* writeEv = ev->Get<NKikimr::NEvents::TDataEvents::TEvWrite>();
+                    auto lockMode = writeEv->Record.GetLockMode();
+                    Cerr << "TEvWrite LockMode: " << NKikimrDataEvents::ELockMode_Name(lockMode) << Endl;
+                    UNIT_ASSERT_VALUES_EQUAL(lockMode, NKikimrDataEvents::PESSIMISTIC_NONE);
+                }
+                return TTestActorRuntime::EEventAction::PROCESS;
+            };
+
+            auto saveObserver = runtime.SetObserverFunc(grab);
+            Y_DEFER { runtime.SetObserverFunc(saveObserver); };
+
             auto client = Kikimr->GetQueryClient();
-            auto session = client.GetSession().GetValueSync().GetSession();
+            auto session = Kikimr->RunCall([&] { return client.GetSession().GetValueSync().GetSession(); });
 
-            auto result = session.ExecuteQuery(Q_(R"(
-                UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul"
-            )"), TTxControl::BeginTx(TTxSettings::ReadCommittedRW()).CommitTx()).ExtractValueSync();
+            auto future = Kikimr->RunInThreadPool([&] {
+                return session.ExecuteQuery(Q_(R"(
+                    UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul"
+                )"), TTxControl::BeginTx(TTxSettings::ReadCommittedRW()).CommitTx()).ExtractValueSync();
+            });
 
-            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::INTERNAL_ERROR, result.GetIssues().ToString());
-            UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "UPDATE WHERE is not supported with READ_COMMITTED_RW");
+            {
+                TDispatchOptions opts;
+                opts.FinalEvents.emplace_back([&](IEventHandle&) {
+                    return evReadCounter >= 1 && evWriteCounter >= 1;
+                });
+                runtime.DispatchEvents(opts, TDuration::Seconds(30));
+            }
+
+            auto result = runtime.WaitFuture(future);
+
+            Cerr << "Result status: " << result.GetStatus() << Endl;
+            Cerr << "evReadCounter: " << evReadCounter << ", evLockCounter: " << evLockCounter 
+                 << ", evLockResultCounter: " << evLockResultCounter << ", evWriteCounter: " << evWriteCounter << Endl;
+            if (result.GetStatus() != EStatus::SUCCESS) {
+                Cerr << "Issues: " << result.GetIssues().ToString() << Endl;
+            }
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            UNIT_ASSERT(evReadCounter >= 1);
+            UNIT_ASSERT(evLockCounter >= 1);
+            UNIT_ASSERT(evLockResultCounter >= 1);
+            UNIT_ASSERT(evWriteCounter >= 1);
         }
     };
 
-    Y_UNIT_TEST(TUpdateWhereReadCommittedRWNotSupported) {
-        TUpdateWhereReadCommittedRWNotSupported tester;
+    Y_UNIT_TEST(TUpdateWhereTakesLocksOltp) {
+        TUpdateWhereTakesLocks tester;
         tester.SetIsOlap(false);
-        tester.SetUseRealThreads(true);
+        tester.SetUseRealThreads(false);
         tester.Execute();
     }
 }

@@ -13,6 +13,7 @@ namespace NKqp {
 TKqpStreamLockWorker::TKqpStreamLockWorker(TKqpStreamLockSettings&& settings)
     : Settings(std::move(settings))
 {
+    Cerr << "DEBUG: TKqpStreamLockWorker constructed. KeyColumns count: " << Settings.KeyColumns.size() << Endl;
     KeyColumnTypes.resize(Settings.KeyColumns.size());
     KeyColumnIds.resize(Settings.KeyColumns.size());
 
@@ -40,7 +41,9 @@ void TKqpStreamLockWorker::Clear() {
 }
 
 void TKqpStreamLockWorker::AddInputRow(NUdf::TUnboxedValue row) {
+    Cerr << "DEBUG: TKqpStreamLockWorker::AddInputRow called. InputRows size before: " << InputRows.size() << Endl;
     InputRows.emplace_back(std::move(row));
+    Cerr << "DEBUG: TKqpStreamLockWorker::AddInputRow done. InputRows size after: " << InputRows.size() << Endl;
 }
 
 TOwnedCellVec TKqpStreamLockWorker::SerializeRowKey(const NUdf::TUnboxedValue& row) {
@@ -209,7 +212,10 @@ TKqpStreamLockWorker::TLockRequestList TKqpStreamLockWorker::RebuildLockRequest(
 }
 
 void TKqpStreamLockWorker::AddLockResult(ui64 requestId, NEvents::TDataEvents::TEvLockRowsResult* result) {
+    Cerr << "DEBUG: TKqpStreamLockWorker::AddLockResult called. requestId=" << requestId << Endl;
+    Cerr << "DEBUG: BatchesByRequestId size: " << BatchesByRequestId.size() << Endl;
     auto requestIt = BatchesByRequestId.find(requestId);
+    Cerr << "DEBUG: requestId found: " << (requestIt != BatchesByRequestId.end()) << Endl;
     if (requestIt == BatchesByRequestId.end()) {
         return;
     }
@@ -220,6 +226,8 @@ void TKqpStreamLockWorker::AddLockResult(ui64 requestId, NEvents::TDataEvents::T
     
     const auto& lockedKeys = record.GetLockedKeys();
     const auto& modifiedKeys = record.GetModifiedKeys();
+
+    Cerr << "DEBUG: lockedKeys count: " << lockedKeys.size() << ", modifiedKeys count: " << modifiedKeys.size() << Endl;
 
     THashSet<ui64> lockedSet(lockedKeys.begin(), lockedKeys.end());
     THashSet<ui64> modifiedSet(modifiedKeys.begin(), modifiedKeys.end());
@@ -236,8 +244,10 @@ void TKqpStreamLockWorker::AddLockResult(ui64 requestId, NEvents::TDataEvents::T
 }
 
 void TKqpStreamLockWorker::ProcessRowsByLockResult(ui64 requestId, TProcessRowCallback callback) {
+    Cerr << "DEBUG: TKqpStreamLockWorker::ProcessRowsByLockResult called. requestId=" << requestId << Endl;
     auto it = BatchesByRequestId.find(requestId);
     if (it == BatchesByRequestId.end()) {
+        Cerr << "DEBUG: ProcessRowsByLockResult - requestId not found!" << Endl;
         return;
     }
 
@@ -249,7 +259,9 @@ void TKqpStreamLockWorker::ProcessRowsByLockResult(ui64 requestId, TProcessRowCa
             continue;
         }
         bool modified = batchInfo.ModifiedFlags[i];
+        Cerr << "DEBUG: ProcessRowsByLockResult - calling callback for row " << i << ", modified=" << modified << Endl;
         callback(std::move(batchInfo.Rows[i]), modified);
+        batchInfo.Rows[i].Clear();
     }
 
     BatchesByRequestId.erase(it);

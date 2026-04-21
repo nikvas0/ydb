@@ -12,6 +12,8 @@ TExprBase KqpBuildUpdateIndexStages(TExprBase node, TExprContext& ctx, const TKq
         return node;
     }
 
+    AFL_ENSURE(kqpCtx.IsolationLevel != NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW); // TODO: UPDATE with READ COMMITTED need to lock and filter rows
+
     auto update = node.Cast<TKqlUpdateRowsIndex>();
     const auto& table = kqpCtx.Tables->ExistingTable(kqpCtx.Cluster, update.Table().Path());
 

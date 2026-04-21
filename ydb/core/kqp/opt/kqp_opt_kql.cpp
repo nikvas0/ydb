@@ -729,9 +729,6 @@ THashSet<TStringBuf> GetUpdateColumns(const TKikimrTableDescription& tableData, 
 TExprBase BuildUpdateTable(const TKiUpdateTable& update, const TKikimrTableDescription& tableData,
     bool withSystemColumns, TExprContext& ctx, TKqpOptimizeContext& kqpCtx)
 {
-    YQL_ENSURE(kqpCtx.IsolationLevel != NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW,
-        "UPDATE WHERE is not supported with READ_COMMITTED_RW isolation level");
-
     auto rowsToUpdate = BuildRowsToUpdate(tableData, withSystemColumns, update.Filter(), update.IsBatch(), update.Pos(), ctx);
 
     auto updateColumns = GetUpdateColumns(tableData, update.Update());
@@ -741,6 +738,11 @@ TExprBase BuildUpdateTable(const TKiUpdateTable& update, const TKikimrTableDescr
     for (const auto& column : updateColumns) {
         updateColumnsList.push_back(TCoAtom(ctx.NewAtom(update.Pos(), column)));
     }
+
+    const bool isSink = NeedSinks(tableData, kqpCtx);
+    const bool useStreamIndex = isSink && kqpCtx.Config->GetEnableIndexStreamWrite();
+
+    AFL_ENSURE(kqpCtx.IsolationLevel != NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW || useStreamIndex);
 
     return Build<TKqlUpsertRows>(ctx, update.Pos())
         .Table(BuildTableMeta(tableData, update.Pos(), ctx))
@@ -753,7 +755,7 @@ TExprBase BuildUpdateTable(const TKiUpdateTable& update, const TKikimrTableDescr
             .Build()
         .IsBatch(update.IsBatch())
         .DefaultColumns<TCoAtomList>().Build()
-        .Settings(IsConditionalUpdateSetting(false, ctx, update.Pos()))
+        .Settings(IsConditionalUpdateSetting(useStreamIndex, ctx, update.Pos()))
         .ReturningColumns(update.ReturningColumns())
         .Done();
 }
@@ -803,6 +805,7 @@ TExprBase BuildUpdateTableWithIndex(const TKiUpdateTable& update, const TKikimrT
     const bool isSink = NeedSinks(tableData, kqpCtx);
 
     const bool useStreamIndex = isSink && kqpCtx.Config->GetEnableIndexStreamWrite();
+    AFL_ENSURE(kqpCtx.IsolationLevel != NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW || useStreamIndex);
 
     // For unique or vector index rewrite UPDATE to UPDATE ON
     if (needsKqpEffect || useStreamIndex) {
