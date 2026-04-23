@@ -319,7 +319,11 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
         tester.Execute();
     }
 
-    class TUpdateWhereTakesLocks : public TTableDataModificationTester {
+    class TReadCommittedTakesLocks : public TTableDataModificationTester {
+    public:
+        TReadCommittedTakesLocks(TString effectQuery)
+            : EffectQuery(effectQuery) {
+        }
     protected:
         void DoExecute() override {
             auto& runtime = *Kikimr->GetTestServer().GetRuntime();
@@ -361,9 +365,7 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
             auto session = Kikimr->RunCall([&] { return client.GetSession().GetValueSync().GetSession(); });
 
             auto future = Kikimr->RunInThreadPool([&] {
-                return session.ExecuteQuery(Q_(R"(
-                    UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul"
-                )"), TTxControl::BeginTx(TTxSettings::ReadCommittedRW()).CommitTx()).ExtractValueSync();
+                return session.ExecuteQuery(EffectQuery, TTxControl::BeginTx(TTxSettings::ReadCommittedRW()).CommitTx()).ExtractValueSync();
             });
 
             {
@@ -384,15 +386,27 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
             }
 
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
-            UNIT_ASSERT(evReadCounter >= 1);
-            UNIT_ASSERT(evLockCounter >= 1);
-            UNIT_ASSERT(evLockResultCounter >= 1);
-            UNIT_ASSERT(evWriteCounter >= 1);
+            UNIT_ASSERT(evReadCounter == EvReadsExpected);
+            UNIT_ASSERT(evLockCounter == EvLocksExpected);
+            UNIT_ASSERT(evLockResultCounter == EvLocksExpected);
+            UNIT_ASSERT(evWriteCounter == EvWritesExpected);
         }
+    
+        TString EffectQuery;
+        size_t EvLocksExpected = 1;
+        size_t EvWritesExpected = 2;
+        size_t EvReadsExpected = 1;
     };
 
     Y_UNIT_TEST(TUpdateWhereTakesLocksOltp) {
-        TUpdateWhereTakesLocks tester;
+        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul")");
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TDeleteWhereTakesLocksOltp) {
+        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` WHERE Name == "Paul")");
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
