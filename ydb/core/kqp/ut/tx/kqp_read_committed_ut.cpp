@@ -425,6 +425,27 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
+
+    Y_UNIT_TEST(TUpsertTakesLocks) {
+        TReadCommittedTakesLocks tester(R"(UPSERT INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Paul", "Upserted"))", 0, 2, 0);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TReplaceTakesLocks) {
+        TReadCommittedTakesLocks tester(R"(REPLACE INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Paul", "Replaced"))", 0, 2, 0);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TInsertTakesLocks) {
+        TReadCommittedTakesLocks tester(R"(INSERT INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Unknown", "Inserted"))", 0, 2, 0);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
 }
 
 } // namespace NKqp
