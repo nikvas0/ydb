@@ -321,8 +321,11 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
 
     class TReadCommittedTakesLocks : public TTableDataModificationTester {
     public:
-        TReadCommittedTakesLocks(TString effectQuery)
-            : EffectQuery(effectQuery) {
+        TReadCommittedTakesLocks(TString effectQuery, size_t evReadsExpected, size_t evWritesExpected, size_t evLocksExpected)
+            : EffectQuery(effectQuery)
+            , EvReadsExpected(evReadsExpected)
+            , EvWritesExpected(evWritesExpected)
+            , EvLocksExpected(evLocksExpected) {
         }
     protected:
         void DoExecute() override {
@@ -338,7 +341,6 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
                     ++evLockCounter;
                     auto* lockEv = ev->Get<NKikimr::NEvents::TDataEvents::TEvLockRows>();
                     auto lockMode = lockEv->Record.GetLockMode();
-                    Cerr << "TEvLockRows LockMode: " << NKikimrDataEvents::ELockMode_Name(lockMode) << Endl;
                     UNIT_ASSERT_VALUES_EQUAL(lockMode, NKikimrDataEvents::PESSIMISTIC_EXCLUSIVE);
                 } else if (ev->GetTypeRewrite() == NKikimr::NEvents::TDataEvents::TEvLockRowsResult::EventType) {
                     ++evLockResultCounter;
@@ -346,13 +348,11 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
                     ++evReadCounter;
                     auto* readEv = ev->Get<NKikimr::TEvDataShard::TEvRead>();
                     auto lockMode = readEv->Record.GetLockMode();
-                    Cerr << "TEvRead LockMode: " << NKikimrDataEvents::ELockMode_Name(lockMode) << Endl;
                     UNIT_ASSERT_VALUES_EQUAL(lockMode, NKikimrDataEvents::PESSIMISTIC_NONE);
                 } else if (ev->GetTypeRewrite() == NKikimr::NEvents::TDataEvents::TEvWrite::EventType) {
                     ++evWriteCounter;
                     auto* writeEv = ev->Get<NKikimr::NEvents::TDataEvents::TEvWrite>();
                     auto lockMode = writeEv->Record.GetLockMode();
-                    Cerr << "TEvWrite LockMode: " << NKikimrDataEvents::ELockMode_Name(lockMode) << Endl;
                     UNIT_ASSERT_VALUES_EQUAL(lockMode, NKikimrDataEvents::PESSIMISTIC_NONE);
                 }
                 return TTestActorRuntime::EEventAction::PROCESS;
@@ -392,21 +392,35 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
             UNIT_ASSERT(evWriteCounter == EvWritesExpected);
         }
     
-        TString EffectQuery;
-        size_t EvLocksExpected = 1;
-        size_t EvWritesExpected = 2;
-        size_t EvReadsExpected = 1;
+        const TString EffectQuery;
+        const size_t EvReadsExpected;
+        const size_t EvWritesExpected;
+        const size_t EvLocksExpected;
     };
 
-    Y_UNIT_TEST(TUpdateWhereTakesLocksOltp) {
-        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul")");
+    Y_UNIT_TEST(TUpdateWhereTakesLocks) {
+        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul")", 1, 2, 1);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
 
-    Y_UNIT_TEST(TDeleteWhereTakesLocksOltp) {
-        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` WHERE Name == "Paul")");
+    Y_UNIT_TEST(TDeleteWhereTakesLocks) {
+        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` WHERE Name == "Paul")", 1, 2, 1);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TUpdateOnTakesLocks) {
+        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` ON (Group, Name, Comment) VALUES (1u, "Paul", "Updated"))", 0, 2, 0);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TDeleteOnTakesLocks) {
+        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` ON (Group, Name) VALUES (1u, "Paul"))", 0, 2, 0);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
