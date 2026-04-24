@@ -1,6 +1,7 @@
 #include "kqp_write_actor.h"
 
 #include "kqp_buffer_lookup_actor.h"
+#include "kqp_buffer_lock_actor.h"
 #include "kqp_write_actor_settings.h"
 #include "kqp_write_table.h"
 
@@ -3112,6 +3113,35 @@ public:
                 return {ptr, id};
             };
 
+            auto createLockActor = [&](const TTableId tableId, const TString& tablePath) -> std::pair<IKqpBufferTableLock*, TActorId> {
+                auto [ptr, actor] = CreateKqpBufferTableLock(TKqpBufferLockSettings{
+                    .Callbacks = this,
+
+                    .TableId = tableId,
+                    .TablePath = tablePath,
+
+                    .LockTxId = LockTxId,
+                    .LockNodeId = LockNodeId,
+                    .LockMode = settings.TransactionSettings.LockMode,
+                    .QuerySpanId = QuerySpanId,
+                    .MvccSnapshot = settings.TransactionSettings.MvccSnapshot,
+
+                    .TxManager = TxManager,
+                    .Alloc = Alloc,
+                    .TypeEnv = *TypeEnv,
+                    .HolderFactory = *HolderFactory,
+                    .SessionActorId = SessionActorId,
+                    .Counters = Counters,
+
+                    .ParentTraceId = BufferWriteActorStateSpan.GetTraceId(),
+                });
+
+                TActorId id = RegisterWithSameMailbox(actor);
+                CA_LOG_D("Create new KqpBufferTableLock for table `" << tablePath << "` (" << tableId << "). lockId=" << LockTxId << ". ActorId=" << id);
+
+                return {ptr, id};
+            };
+
 
             auto& writeInfo = WriteInfos[settings.TableId.PathId];
             if (!writeInfo.Actors.contains(settings.TableId.PathId)) {
@@ -3133,6 +3163,18 @@ public:
             // TxManager::AddAction (called from UpdateShards) will collect per-shard SpanIds.
             for (auto& [pathId, actorInfo] : writeInfo.Actors) {
                 actorInfo.WriteActor->SetCurrentQuerySpanId(settings.QuerySpanId);
+            }
+
+            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE) 
+            {
+                auto& lockInfo = LockInfos[settings.TableId.PathId];
+                if (!lockInfo.Actors.contains(settings.TableId.PathId)) {
+                    const auto [ptr, id] = createLockActor(settings.TableId, settings.TablePath);
+                    AFL_ENSURE(lockInfo.Actors.emplace(settings.TableId.PathId, TLockInfo::TActorInfo{
+                        .LockActor = ptr,
+                        .Id = id,
+                    }).second);
+                }
             }
 
             if (!settings.LookupColumns.empty()) {
@@ -3994,6 +4036,10 @@ public:
     }
 
     void Clear() {
+        ForEachLockActor([](IKqpBufferTableLock* actor, const TActorId) {
+            actor->Terminate();
+        });
+
         ForEachLookupActor([](IKqpBufferTableLookup* actor, const TActorId) {
             actor->Terminate();
         });
@@ -4007,6 +4053,7 @@ public:
             TGuard<NMiniKQL::TScopedAlloc> allocGuard(*Alloc);
             WriteInfos.clear();
             LookupInfos.clear();
+            LockInfos.clear();
             WriteTasks.clear();
             HolderFactory.reset();
             TypeEnv.reset();
@@ -4350,6 +4397,10 @@ public:
         AFL_ENSURE(AfterWaitTasksState);
         auto afterWaitTasksState = std::move(*AfterWaitTasksState);
         AfterWaitTasksState = std::nullopt;
+
+        ForEachLockActor([](IKqpBufferTableLock* actor, const TActorId) {
+            actor->Unlink();
+        });
 
         ForEachLookupActor([](IKqpBufferTableLookup* actor, const TActorId) {
             actor->Unlink();
@@ -5064,6 +5115,9 @@ public:
         ForEachWriteActor([&](TKqpTableWriteActor* actor, const TActorId) {
             actor->FillStats(&result);
         });
+        ForEachLockActor([&](IKqpBufferTableLock* actor, const TActorId) {
+            actor->FillStats(&result);
+        });
         ForEachLookupActor([&](IKqpBufferTableLookup* actor, const TActorId) {
             actor->FillStats(&result);
         });
@@ -5121,6 +5175,22 @@ public:
         for (auto& [_, lookupInfo] : LookupInfos) {
             for (auto& [_, actorInfo] : lookupInfo.Actors) {
                 func(actorInfo.LookupActor, actorInfo.Id);
+            }
+        }
+    }
+
+    void ForEachLockActor(std::function<void(IKqpBufferTableLock*, const TActorId)>&& func) {
+        for (auto& [_, lockInfo] : LockInfos) {
+            for (auto& [_, actorInfo] : lockInfo.Actors) {
+                func(actorInfo.LockActor, actorInfo.Id);
+            }
+        }
+    }
+
+    void ForEachLockActor(std::function<void(const IKqpBufferTableLock*, const TActorId)>&& func) const {
+        for (auto& [_, lockInfo] : LockInfos) {
+            for (auto& [_, actorInfo] : lockInfo.Actors) {
+                func(actorInfo.LockActor, actorInfo.Id);
             }
         }
     }
@@ -5192,6 +5262,15 @@ private:
         THashMap<TPathId, TActorInfo> Actors;
     };
 
+    struct TLockInfo {
+        struct TActorInfo {
+            IKqpBufferTableLock* LockActor = nullptr;
+            TActorId Id;
+        };
+
+        THashMap<TPathId, TActorInfo> Actors;
+    };
+
     class TReturningConsumer : public TKqpWriteTask::IKqpReturningConsumer  {
     public:
         void Consume(IDataBatchPtr data) override {
@@ -5235,6 +5314,7 @@ private:
 
     THashMap<TPathId, TWriteInfo> WriteInfos;
     THashMap<TPathId, TLookupInfo> LookupInfos;
+    THashMap<TPathId, TLockInfo> LockInfos;
     THashMap<ui64, TReturningConsumer> ReturningConsumers;
     THashMap<ui64, TKqpWriteTask> WriteTasks;
     TKqpTableWriteActor::TWriteToken CurrentWriteToken = 0;
