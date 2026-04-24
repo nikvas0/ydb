@@ -59,9 +59,10 @@ public:
     {
         IngressStats.Level = args.StatsLevel;
 
-        if ((LockMode && *LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)
-            || (LockMode && *LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE 
-                && IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW)) {
+        if (LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK) {
+            AFL_ENSURE(IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW);
+            AFL_ENSURE(LockMode);
+            AFL_ENSURE(*LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE);
             Cerr << "DEBUG: Creating StreamLockWorker. LockMode: " << (LockMode ? NKikimrDataEvents::ELockMode_Name(*LockMode) : "none")
                  << ", IsolationLevel: " << (int)IsolationLevel << Endl;
             TKqpStreamLockSettings lockSettings(args.HolderFactory);
@@ -136,7 +137,8 @@ public:
             if (mstats && !HasVectorTopK) {
                 switch(LookupStrategy) {
                     case NKqpProto::EStreamLookupStrategy::LOOKUP:
-                    case NKqpProto::EStreamLookupStrategy::UNIQUE: {
+                    case NKqpProto::EStreamLookupStrategy::UNIQUE:
+                    case NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK: {
                         // in lookup case without top-K pushdown we return as result actual data, that we read from the datashard.
                         rowsReadEstimate = mstats->Inputs[InputIndex]->RowsConsumed;
                         bytesReadEstimate = mstats->Inputs[InputIndex]->BytesConsumed;

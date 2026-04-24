@@ -14,7 +14,6 @@ namespace NKqp {
 TKqpStreamLockWorker::TKqpStreamLockWorker(TKqpStreamLockSettings&& settings)
     : Settings(std::move(settings))
 {
-
     KeyColumnTypes.resize(Settings.KeyColumns.size());
     KeyColumnIds.resize(Settings.KeyColumns.size());
 
