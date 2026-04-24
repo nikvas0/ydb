@@ -50,7 +50,6 @@ public:
         , QuerySpanId(settings.HasQuerySpanId() ? settings.GetQuerySpanId() : 0)
         , SchemeCacheRequestTimeout(SCHEME_CACHE_REQUEST_TIMEOUT)
         , LookupStrategy(settings.GetLookupStrategy())
-        , StreamLookupWorker(CreateStreamLookupWorker(std::move(settings), args.TaskId, args.TypeEnv, args.HolderFactory, args.InputDesc))
         , IsolationLevel(settings.GetIsolationLevel())
         , Database(settings.GetDatabase())
         , MaxTotalBytesQuota(MaxTotalBytesQuotaStreamLookup())
@@ -61,14 +60,17 @@ public:
         IngressStats.Level = args.StatsLevel;
 
         if ((LockMode && *LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)
-        || (LockMode && *LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE 
-            && IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW)) {
-        Cerr << "DEBUG: Creating StreamLockWorker. LockMode: " << (LockMode ? NKikimrDataEvents::ELockMode_Name(*LockMode) : "none")
-             << ", IsolationLevel: " << (int)IsolationLevel << Endl;
-            TKqpStreamLockSettings lockSettings;
+            || (LockMode && *LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE 
+                && IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW)) {
+            Cerr << "DEBUG: Creating StreamLockWorker. LockMode: " << (LockMode ? NKikimrDataEvents::ELockMode_Name(*LockMode) : "none")
+                 << ", IsolationLevel: " << (int)IsolationLevel << Endl;
+            TKqpStreamLockSettings lockSettings(args.HolderFactory);
             lockSettings.Table = settings.GetTable();
             for (const auto& col : settings.GetKeyColumns()) {
                 lockSettings.KeyColumns.push_back(col);
+            }
+            for (const auto& col : settings.GetColumns()) {
+                lockSettings.Columns.push_back(col);
             }
             lockSettings.LockTxId = LockTxId ? *LockTxId : 0;
             lockSettings.LockNodeId = NodeLockId ? *NodeLockId : 0;
@@ -84,6 +86,13 @@ public:
                 std::move(lockSettings)
             );
         }
+
+        StreamLookupWorker = CreateStreamLookupWorker(
+            std::move(settings),
+            args.TaskId,
+            args.TypeEnv,
+            args.HolderFactory,
+            args.InputDesc);
     }
 
     virtual ~TKqpStreamLookupActor() {
@@ -897,6 +906,11 @@ private:
             Cerr << "DEBUG: Lock failed with status: " << record.GetStatus() << Endl;
             RuntimeError(errorMsg, NYql::NDqProto::StatusIds::ABORTED);
             return;
+        }
+
+        for (const auto& lock : record.GetLocks()) {
+            // TODO: fail early on broken locks
+            Locks.push_back(lock);
         }
 
         ui64 requestId = record.GetRequestId();

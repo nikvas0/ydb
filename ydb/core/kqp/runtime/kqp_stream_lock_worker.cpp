@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <util/generic/hash.h>
 #include <ydb/core/engine/mkql_keys.h>
+#include <ydb/core/engine/minikql/minikql_engine_host.h>
 #include <ydb/core/kqp/common/kqp_resolve.h>
 #include <ydb/core/scheme/scheme_tablecell.h>
 #include <ydb/core/tx/data_events/events.h>
@@ -13,7 +14,7 @@ namespace NKqp {
 TKqpStreamLockWorker::TKqpStreamLockWorker(TKqpStreamLockSettings&& settings)
     : Settings(std::move(settings))
 {
-    Cerr << "DEBUG: TKqpStreamLockWorker constructed. KeyColumns count: " << Settings.KeyColumns.size() << Endl;
+
     KeyColumnTypes.resize(Settings.KeyColumns.size());
     KeyColumnIds.resize(Settings.KeyColumns.size());
 
@@ -26,6 +27,26 @@ TKqpStreamLockWorker::TKqpStreamLockWorker(TKqpStreamLockSettings&& settings)
             col.HasTypeInfo() ? &col.GetTypeInfo() : nullptr);
         KeyColumnTypes[i] = typeInfoMod.TypeInfo;
     }
+
+    ColumnTypes.resize(Settings.Columns.size());
+    ColumnIds.resize(Settings.Columns.size());
+
+    for (size_t i = 0; i < Settings.Columns.size(); ++i) {
+        const auto& col = Settings.Columns[i];
+        ColumnIds[i] = col.GetId();
+        
+        auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(
+            col.GetTypeId(),
+            col.HasTypeInfo() ? &col.GetTypeInfo() : nullptr);
+        ColumnTypes[i] = typeInfoMod.TypeInfo;
+    }
+
+    KeyColumnPositions.resize(KeyColumnIds.size());
+    for (size_t keyIdx = 0; keyIdx < KeyColumnIds.size(); ++keyIdx) {
+        auto it = std::find(ColumnIds.begin(), ColumnIds.end(), KeyColumnIds[keyIdx]);
+        YQL_ENSURE(it != ColumnIds.end(), "Key column not found in Columns");
+        KeyColumnPositions[keyIdx] = std::distance(ColumnIds.begin(), it);
+    }
 }
 
 TKqpStreamLockWorker::~TKqpStreamLockWorker() {
@@ -33,29 +54,25 @@ TKqpStreamLockWorker::~TKqpStreamLockWorker() {
 }
 
 void TKqpStreamLockWorker::Clear() {
-    for (auto& row : InputRows) {
-        row.Clear();
-    }
     InputRows.clear();
     BatchesByRequestId.clear();
 }
 
 void TKqpStreamLockWorker::AddInputRow(NUdf::TUnboxedValue row) {
-    Cerr << "DEBUG: TKqpStreamLockWorker::AddInputRow called. InputRows size before: " << InputRows.size() << Endl;
-    InputRows.emplace_back(std::move(row));
-    Cerr << "DEBUG: TKqpStreamLockWorker::AddInputRow done. InputRows size after: " << InputRows.size() << Endl;
+    std::vector<TCell> cells(ColumnTypes.size());
+    NMiniKQL::TStringProviderBackend backend;
+    
+    for (size_t colIdx = 0; colIdx < ColumnTypes.size(); ++colIdx) {
+        auto value = row.GetElement(colIdx);
+        cells[colIdx] = MakeCell(ColumnTypes[colIdx], value, backend, true);
+    }
+    
+    InputRows.emplace_back(std::move(cells));
 }
 
-TOwnedCellVec TKqpStreamLockWorker::SerializeRowKey(const NUdf::TUnboxedValue& row) {
-    NMiniKQL::TStringProviderBackend backend;
-    TVector<TCell> cells(KeyColumnTypes.size());
-    
-    for (size_t colIdx = 0; colIdx < KeyColumnIds.size(); ++colIdx) {
-        auto value = row.GetElement(colIdx);
-        cells[colIdx] = MakeCell(KeyColumnTypes[colIdx], value, backend, true);
-    }
-
-    return TOwnedCellVec::Make(cells);
+void TKqpStreamLockWorker::AddInputRow(TConstArrayRef<TCell> inputRow) {
+    AFL_ENSURE(inputRow.size() == ColumnTypes.size());
+    InputRows.emplace_back(TOwnedCellVec::Make(inputRow));
 }
 
 TVector<TCell> TKqpStreamLockWorker::SerializeKeysToCellVec(const std::vector<TOwnedCellVec>& keys) {
@@ -72,6 +89,18 @@ TVector<TCell> TKqpStreamLockWorker::SerializeKeysToCellVec(const std::vector<TO
     }
 
     return allCells;
+}
+
+NUdf::TUnboxedValue TKqpStreamLockWorker::ConvertRowToUnboxedValue(const TOwnedCellVec& row) const {
+    AFL_ENSURE(row.size() == ColumnTypes.size());
+    NUdf::TUnboxedValue* rowItems = nullptr;
+    auto result = Settings.HolderFactory.CreateDirectArrayHolder(ColumnTypes.size(), rowItems);
+
+    for (size_t colIdx = 0; colIdx < ColumnTypes.size(); ++colIdx) {
+        rowItems[colIdx] = NMiniKQL::GetCellValue(row[colIdx], ColumnTypes[colIdx]);
+    }
+
+    return result;
 }
 
 THolder<NEvents::TDataEvents::TEvLockRows> TKqpStreamLockWorker::BuildLockRequestMessage(
@@ -112,15 +141,19 @@ TKqpStreamLockWorker::TLockRequestList TKqpStreamLockWorker::BuildLockRequests(
         return requests;
     }
 
+    const size_t keyColumnCount = KeyColumnTypes.size();
     THashMap<ui64, TVector<std::pair<ui64, TOwnedCellVec>>> keysByShard;
 
     for (ui64 rowIndex = 0; rowIndex < InputRows.size(); ++rowIndex) {
         const auto& row = InputRows[rowIndex];
-        if (row.IsInvalid()) {
-            continue;
+        
+        TVector<TCell> keyCellsData;
+        keyCellsData.reserve(keyColumnCount);
+        for (size_t keyIdx = 0; keyIdx < KeyColumnIds.size(); ++keyIdx) {
+            size_t colPos = KeyColumnPositions[keyIdx];
+            keyCellsData.push_back(row[colPos]);
         }
-
-        auto keyCells = SerializeRowKey(row);
+        TOwnedCellVec keyCells = TOwnedCellVec::Make(keyCellsData);
 
         auto shardIter = std::lower_bound(
             partitioning->begin(),
@@ -136,8 +169,6 @@ TKqpStreamLockWorker::TLockRequestList TKqpStreamLockWorker::BuildLockRequests(
         ui64 shardId = shardIter->ShardId;
         keysByShard[shardId].push_back({rowIndex, std::move(keyCells)});
     }
-
-    const size_t keyColumnCount = KeyColumnTypes.size();
 
     for (auto& [shardId, keys] : keysByShard) {
         AFL_ENSURE(!keys.empty());
@@ -164,9 +195,6 @@ TKqpStreamLockWorker::TLockRequestList TKqpStreamLockWorker::BuildLockRequests(
         requests.emplace_back(shardId, std::move(lockRequest));
     }
 
-    for (auto& row : InputRows) {
-        row.Clear();
-    }
     InputRows.clear();
 
     return requests;
@@ -212,10 +240,7 @@ TKqpStreamLockWorker::TLockRequestList TKqpStreamLockWorker::RebuildLockRequest(
 }
 
 void TKqpStreamLockWorker::AddLockResult(ui64 requestId, NEvents::TDataEvents::TEvLockRowsResult* result) {
-    Cerr << "DEBUG: TKqpStreamLockWorker::AddLockResult called. requestId=" << requestId << Endl;
-    Cerr << "DEBUG: BatchesByRequestId size: " << BatchesByRequestId.size() << Endl;
     auto requestIt = BatchesByRequestId.find(requestId);
-    Cerr << "DEBUG: requestId found: " << (requestIt != BatchesByRequestId.end()) << Endl;
     if (requestIt == BatchesByRequestId.end()) {
         return;
     }
@@ -226,8 +251,6 @@ void TKqpStreamLockWorker::AddLockResult(ui64 requestId, NEvents::TDataEvents::T
     
     const auto& lockedKeys = record.GetLockedKeys();
     const auto& modifiedKeys = record.GetModifiedKeys();
-
-    Cerr << "DEBUG: lockedKeys count: " << lockedKeys.size() << ", modifiedKeys count: " << modifiedKeys.size() << Endl;
 
     THashSet<ui64> lockedSet(lockedKeys.begin(), lockedKeys.end());
     THashSet<ui64> modifiedSet(modifiedKeys.begin(), modifiedKeys.end());
@@ -244,10 +267,8 @@ void TKqpStreamLockWorker::AddLockResult(ui64 requestId, NEvents::TDataEvents::T
 }
 
 void TKqpStreamLockWorker::ProcessRowsByLockResult(ui64 requestId, TProcessRowCallback callback) {
-    Cerr << "DEBUG: TKqpStreamLockWorker::ProcessRowsByLockResult called. requestId=" << requestId << Endl;
     auto it = BatchesByRequestId.find(requestId);
     if (it == BatchesByRequestId.end()) {
-        Cerr << "DEBUG: ProcessRowsByLockResult - requestId not found!" << Endl;
         return;
     }
 
@@ -259,9 +280,28 @@ void TKqpStreamLockWorker::ProcessRowsByLockResult(ui64 requestId, TProcessRowCa
             continue;
         }
         bool modified = batchInfo.ModifiedFlags[i];
-        Cerr << "DEBUG: ProcessRowsByLockResult - calling callback for row " << i << ", modified=" << modified << Endl;
-        callback(std::move(batchInfo.Rows[i]), modified);
-        batchInfo.Rows[i].Clear();
+        NUdf::TUnboxedValue row = ConvertRowToUnboxedValue(batchInfo.Rows[i]);
+        callback(row, modified);
+    }
+
+    BatchesByRequestId.erase(it);
+}
+
+void TKqpStreamLockWorker::ProcessRowsByLockResult(ui64 requestId, TProcessRowCallbackOwned callback) {
+    auto it = BatchesByRequestId.find(requestId);
+    if (it == BatchesByRequestId.end()) {
+        return;
+    }
+
+    auto& batchInfo = it->second;
+    AFL_ENSURE(batchInfo.LockResultReceived);
+
+    for (size_t i = 0; i < batchInfo.BatchSize; ++i) {
+        if (!batchInfo.LockedFlags[i]) {
+            continue;
+        }
+        bool modified = batchInfo.ModifiedFlags[i];
+        callback(batchInfo.Rows[i], modified);
     }
 
     BatchesByRequestId.erase(it);
