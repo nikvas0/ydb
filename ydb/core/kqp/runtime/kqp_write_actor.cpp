@@ -1619,6 +1619,7 @@ private:
         BUFFERING,
         LOCK_MAIN_TABLE,
         LOOKUP_MAIN_TABLE,
+        LOCK_UNIQUE_INDEX,
         LOOKUP_UNIQUE_INDEX,
         WRITING,
         CLOSING,
@@ -1713,6 +1714,8 @@ public:
                     return ProcessLockingMainTable();
                 case EState::LOOKUP_MAIN_TABLE:
                     return ProcessLookupMainTable();
+                case EState::LOCK_UNIQUE_INDEX:
+                    return ProcessLockingUniqueIndex();
                 case EState::LOOKUP_UNIQUE_INDEX:
                     return ProcessLookupUniqueIndex();
                 case EState::WRITING:
@@ -1799,7 +1802,7 @@ private:
 
         std::swap(BufferedBatches, ProcessBatches);
 
-        return ProcessStartReadWrite(false);
+        return StartProcessing(false);
     }
 
     bool ProcessLockingMainTable() {
@@ -1813,10 +1816,10 @@ private:
             return false;
         }
 
-        return ProcessStartReadWrite(true);
+        return StartProcessing(true);
     }
 
-    bool ProcessStartReadWrite(bool locked) {
+    bool StartProcessing(bool locked) {
         const bool needLock = !locked && PathLockInfo.contains(PathId);
         const bool needLookup = PathLookupInfo.contains(PathId);
 
@@ -1887,40 +1890,14 @@ private:
         if (!PathLookupInfo.empty()) {
             // Need to lookup unique indexes.
             // In this case unique indexes keys are subsets of main table key or operation is INSERT.
-            AFL_ENSURE(OperationType != NKikimrKqp::TKqpTableSinkSettings::MODE_DELETE);
-
-            for (auto& [pathId, lookupInfo] : PathLookupInfo) {
-                AFL_ENSURE(pathId != PathId);
-
-                TUniqueSecondaryKeyCollector collector(
-                    KeyColumnTypes,
-                    lookupInfo.Lookup->GetKeyColumnTypes(),
-                    lookupInfo.KeyIndexes,
-                    lookupInfo.FullKeyIndexes,
-                    lookupInfo.PrimaryInFullKeyIndexes);
-                for (const auto& write : Writes) {
-                    for (const auto& row : GetRows(write.Batch)) {
-                        if (!collector.AddRow(row)) {
-                            Error = DuplicateKeyErrorText;
-                            return false;
-                        }
-                    }
-                }
-
-                const auto uniqueSecondaryKeys = std::move(collector).BuildUniqueSecondaryKeys();
-
-                lookupInfo.Lookup->AddUniqueCheckTask(
-                    Cookie,
-                    std::vector<TConstArrayRef<TCell>>{uniqueSecondaryKeys.begin(), uniqueSecondaryKeys.end()},
-                    /* fail on existing row*/
-                    OperationType == NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT);
+            if (!PathLockInfo.empty()) {
+                return StartUniqueIndexLock();
             }
-
-            State = EState::LOOKUP_UNIQUE_INDEX;
+            return StartUniqueIndexLookup();
         } else {
             State = EState::WRITING;
+            return true;
         }
-        return true;
     }
 
     bool ProcessLookupMainTable() {
@@ -2020,31 +1997,91 @@ private:
 
         if (PathLookupInfo.size() > 1) {
             // Lookup unique indexes
-            AFL_ENSURE(OperationType != NKikimrKqp::TKqpTableSinkSettings::MODE_DELETE);
+            if (!PathLockInfo.empty()) {
+                return StartUniqueIndexLock();
+            }
+            return StartUniqueIndexLookup();
+        } else {
+            State = EState::WRITING;
+            return true;
+        }
+    }
 
-            AFL_ENSURE(Writes.size() == 1);
-            const auto writeRows = GetRows(Writes[0].Batch);
-            const auto& existsMask = Writes[0].ExistsMask;
-            AFL_ENSURE(writeRows.size() == existsMask.size());
-
-            for (auto& [pathId, lookupInfo] : PathLookupInfo) {
-                if (pathId == PathId) {
-                    continue;
-                }
-
+    bool StartUniqueIndexLock() {
+        for (auto& [pathId, lockInfo] : PathLockInfo) {
+            if (pathId != PathId) {
                 TUniqueSecondaryKeyCollector collector(
-                        KeyColumnTypes,
-                        lookupInfo.Lookup->GetKeyColumnTypes(),
-                        lookupInfo.KeyIndexes,
-                        lookupInfo.FullKeyIndexes,
-                        lookupInfo.PrimaryInFullKeyIndexes);
+                    KeyColumnTypes,
+                    lockInfo.LockActor->GetKeyColumnTypes(),
+                    lockInfo.KeyIndexes,
+                    lockInfo.KeyIndexes,
+                    std::vector<ui32>{});
+                for (const auto& write : Writes) {
+                    for (const auto& row : GetRows(write.Batch)) {
+                        if (!collector.AddRow(row)) {
+                            Error = DuplicateKeyErrorText;
+                            return false;
+                        }
+                    }
+                }
+                const auto uniqueSecondaryKeys = std::move(collector).BuildUniqueSecondaryKeys();
+                lockInfo.LockActor->AddLockTask(
+                    Cookie,
+                    std::vector<TConstArrayRef<TCell>>{uniqueSecondaryKeys.begin(), uniqueSecondaryKeys.end()});
+            }
+        }
 
-                AFL_ENSURE(lookupInfo.KeyIndexes.size() == lookupInfo.OldKeyIndexes.size());
-                AFL_ENSURE(lookupInfo.KeyIndexes.size() <= lookupInfo.Lookup->GetKeyColumnTypes().size());
+        State = EState::LOCK_UNIQUE_INDEX;
+        return true;
+    }
+
+    bool ProcessLockingUniqueIndex() {
+        AFL_ENSURE(!IsError());
+
+        for (auto& [pathId, lockInfo] : PathLockInfo) {
+            if (pathId != PathId) {
+                if (!lockInfo.LockActor->HasResult(Cookie) && !lockInfo.LockActor->IsEmpty(Cookie)) {
+                    return false;
+                }
+            }
+        }
+
+        return StartUniqueIndexLookup();
+    }
+
+    bool StartUniqueIndexLookup() {
+        const bool skipExistingKeys = PathLookupInfo.contains(PathId); // has main table lookup
+        // skipExistingKeys=false means that unique indexes keys are subsets of main table key or operation is INSERT.
+
+        AFL_ENSURE(OperationType != NKikimrKqp::TKqpTableSinkSettings::MODE_DELETE);
+        // INSERT => !skipExistingKeys
+        AFL_ENSURE(OperationType != NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT || !skipExistingKeys);
+
+        for (auto& [pathId, lookupInfo] : PathLookupInfo) {
+            if (pathId == PathId) {
+                AFL_ENSURE(skipExistingKeys);
+                continue;
+            }
+
+            TUniqueSecondaryKeyCollector collector(
+                    KeyColumnTypes,
+                    lookupInfo.Lookup->GetKeyColumnTypes(),
+                    lookupInfo.KeyIndexes,
+                    lookupInfo.FullKeyIndexes,
+                    lookupInfo.PrimaryInFullKeyIndexes);
+
+            AFL_ENSURE(lookupInfo.KeyIndexes.size() == lookupInfo.OldKeyIndexes.size());
+            AFL_ENSURE(lookupInfo.KeyIndexes.size() <= lookupInfo.Lookup->GetKeyColumnTypes().size());
+
+            for (const auto& write : Writes) {
+                const auto writeRows = GetRows(write.Batch);
+                const auto& existsMask = write.ExistsMask;
+                AFL_ENSURE(writeRows.size() == existsMask.size());
                 for (size_t index = 0; index < writeRows.size(); ++index) {
-                    // Only UPSERT/REPLACE/UPDATE here
                     const auto& row = writeRows[index];
-                    if (existsMask[index]
+                    // Only UPSERT/REPLACE/UPDATE here with skipExistingKeys
+                    if (skipExistingKeys
+                            && existsMask[index]
                             && IsEqual(
                                 row,
                                 lookupInfo.KeyIndexes,
@@ -2059,20 +2096,18 @@ private:
                         return false;
                     }
                 }
-
-                const auto uniqueSecondaryKeys = std::move(collector).BuildUniqueSecondaryKeys();
-
-                lookupInfo.Lookup->AddUniqueCheckTask(
-                    Cookie,
-                    std::vector<TConstArrayRef<TCell>>{uniqueSecondaryKeys.begin(), uniqueSecondaryKeys.end()},
-                    /* fail on existing row*/
-                    false);
             }
 
-            State = EState::LOOKUP_UNIQUE_INDEX;
-        } else {
-            State = EState::WRITING;
+            const auto uniqueSecondaryKeys = std::move(collector).BuildUniqueSecondaryKeys();
+
+            lookupInfo.Lookup->AddUniqueCheckTask(
+                Cookie,
+                std::vector<TConstArrayRef<TCell>>{uniqueSecondaryKeys.begin(), uniqueSecondaryKeys.end()},
+                /* fail on existing row*/
+                OperationType == NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT);
         }
+
+        State = EState::LOOKUP_UNIQUE_INDEX;
         return true;
     }
 
@@ -3295,10 +3330,10 @@ public:
                 if (indexSettings.IsUniq &&
                         (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE
                         || settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)) {
-                    auto& lockInfo = LockInfos[settings.TableId.PathId];
-                    if (!lockInfo.Actors.contains(settings.TableId.PathId)) {
-                        const auto [ptr, id] = createLockActor(settings.TableId, settings.TablePath);
-                        AFL_ENSURE(lockInfo.Actors.emplace(settings.TableId.PathId, TLockInfo::TActorInfo{
+                    auto& lockInfo = LockInfos[indexSettings.TableId.PathId];
+                    if (!lockInfo.Actors.contains(indexSettings.TableId.PathId)) {
+                        const auto [ptr, id] = createLockActor(indexSettings.TableId, indexSettings.TablePath);
+                        AFL_ENSURE(lockInfo.Actors.emplace(indexSettings.TableId.PathId, TLockInfo::TActorInfo{
                             .LockActor = ptr,
                             .Id = id,
                         }).second);
@@ -3527,6 +3562,24 @@ public:
                     lockActor->SetLockSettings(
                         token.Cookie,
                         settings.KeyColumns);
+                }
+
+                for (const auto& indexSettings : settings.Indexes) {
+                    if (indexSettings.IsUniq) {
+                        auto& indexLockInfo = LockInfos[indexSettings.TableId.PathId];
+                        if (indexLockInfo.Actors.contains(indexSettings.TableId.PathId)) {
+                            auto lockActor = indexLockInfo.Actors.at(indexSettings.TableId.PathId).LockActor;
+
+                            locks.emplace_back(TKqpWriteTask::TPathLockInfo{
+                                .KeyIndexes = {},
+                                .LockActor = lockActor,
+                            });
+
+                            lockActor->SetLockSettings(
+                                token.Cookie,
+                                indexSettings.KeyColumns);
+                        }
+                    }
                 }
             }
 
