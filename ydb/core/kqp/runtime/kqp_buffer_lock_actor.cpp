@@ -382,6 +382,8 @@ public:
             lockState.CollectedLocks.push_back(lock);
         }
 
+        lockState.Worker->AddLockResult(record.GetRequestId(), ev->Get());
+
         lockState.Worker->ProcessRowsByLockResult(record.GetRequestId(),
             [&](const TOwnedCellVec& row, bool modified) {
                 lockState.CollectedRows.emplace_back(row, modified);

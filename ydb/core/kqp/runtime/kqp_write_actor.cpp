@@ -1608,10 +1608,16 @@ public:
         IKqpReturningConsumer* Consumer = nullptr;
     };
 
+    struct TPathLockInfo {
+        std::vector<ui32> KeyIndexes;
+        IKqpBufferTableLock* LockActor = nullptr;
+    };
+
 private:
     enum class EState {
         BLOCKED,
         BUFFERING,
+        LOCK_MAIN_TABLE,
         LOOKUP_MAIN_TABLE,
         LOOKUP_UNIQUE_INDEX,
         WRITING,
@@ -1631,6 +1637,7 @@ public:
             std::optional<TReturningInfo> returning,
             TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> keyColumns,
             std::vector<ui32> defaultMap,
+            std::vector<TPathLockInfo> locks,
             std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc)
         : Cookie(cookie)
         , DeleteCookie(deleteCookie)
@@ -1668,6 +1675,10 @@ public:
             }
         }
 
+        for (const auto& lock : locks) {
+            PathLockInfo[lock.LockActor->GetTableId().PathId] = lock;
+        }
+
         ReturningInfo = returning;
     }
 
@@ -1698,6 +1709,8 @@ public:
                     return false;
                 case EState::BUFFERING:
                     return ProcessBuffering(forceFlush);
+                case EState::LOCK_MAIN_TABLE:
+                    return ProcessLockingMainTable();
                 case EState::LOOKUP_MAIN_TABLE:
                     return ProcessLookupMainTable();
                 case EState::LOOKUP_UNIQUE_INDEX:
@@ -1784,17 +1797,39 @@ private:
             }
         }
 
-        if (auto lookupInfoIt = PathLookupInfo.find(PathId); lookupInfoIt != PathLookupInfo.end()) {
-            // Need to lookup main table
+        std::swap(BufferedBatches, ProcessBatches);
+
+        return ProcessStartReadWrite(false);
+    }
+
+    bool ProcessLockingMainTable() {
+        AFL_ENSURE(!IsError());
+        AFL_ENSURE(!ProcessBatches.empty());
+        AFL_ENSURE(!ProcessCells.empty());
+
+        auto& lockInfo = PathLockInfo.at(PathId);
+
+        if (!lockInfo.LockActor->HasResult(Cookie) && !lockInfo.LockActor->IsEmpty(Cookie)) {
+            return false;
+        }
+
+        return ProcessStartReadWrite(true);
+    }
+
+    bool ProcessStartReadWrite(bool locked) {
+        const bool needLock = !locked && PathLockInfo.contains(PathId);
+        const bool needLookup = PathLookupInfo.contains(PathId);
+
+        if (needLookup) {
             AFL_ENSURE(OperationType != NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT);
+            AFL_ENSURE(PathLookupInfo.at(PathId).KeyIndexes.empty());
+        }
 
-            std::swap(BufferedBatches, ProcessBatches);
-
-            auto& lookupInfo = lookupInfoIt->second;
-            AFL_ENSURE(lookupInfo.KeyIndexes.empty());
-
+        if (needLock || needLookup) {
             THashSet<TConstArrayRef<TCell>, NKikimr::TCellVectorsHash, NKikimr::TCellVectorsEquals> primaryKeysSet;
             size_t index = 0;
+            ProcessCells.clear();
+            KeyToIndexes.clear();
             for (const auto& batch : ProcessBatches) {
                 for (const auto& row : GetRows(batch)) {
                     ProcessCells.push_back(row);
@@ -1805,17 +1840,28 @@ private:
             }
 
             AFL_ENSURE(!ProcessCells.empty());
-            lookupInfo.Lookup->AddLookupTask(
-                Cookie, std::vector<TConstArrayRef<TCell>>(primaryKeysSet.begin(), primaryKeysSet.end()));
 
-            State = EState::LOOKUP_MAIN_TABLE;
+            if (needLock) {
+                auto& lockInfo = PathLockInfo.at(PathId);
+                lockInfo.LockActor->AddLockTask(
+                    Cookie,
+                    std::vector<TConstArrayRef<TCell>>(primaryKeysSet.begin(), primaryKeysSet.end()));
+                State = EState::LOCK_MAIN_TABLE;
+            } else {
+                AFL_ENSURE(needLookup);
+                auto& lookupInfo = PathLookupInfo.at(PathId);
+                lookupInfo.Lookup->AddLookupTask(
+                    Cookie, std::vector<TConstArrayRef<TCell>>(primaryKeysSet.begin(), primaryKeysSet.end()));
+                State = EState::LOOKUP_MAIN_TABLE;
+            }
+
             return true;
         }
 
         // TODO: remove !PathLookupInfo.empty() after full error support
         if (OperationType == NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT && PathWriteInfo.size() > 1) {
             THashSet<TConstArrayRef<TCell>, NKikimr::TCellVectorsHash, NKikimr::TCellVectorsEquals> primaryKeysSet;
-            for (const auto& batch : BufferedBatches) {
+            for (const auto& batch : ProcessBatches) {
                 for (const auto& row : GetRows(batch)) {
                     const auto& key = row.first(KeyColumnTypes.size());
                     if (!primaryKeysSet.insert(key).second) {
@@ -1826,15 +1872,17 @@ private:
             }
         }
 
-        Writes.reserve(BufferedBatches.size());
-        for (auto& batch : BufferedBatches) {
+        Writes.reserve(ProcessBatches.size());
+        for (auto& batch : ProcessBatches) {
             const auto rowsCount = batch->GetRowsCount();
             Writes.push_back(TWrite{
                 .Batch = std::move(batch),
                 .ExistsMask = std::vector<bool>(rowsCount, true),
             });
         }
-        BufferedBatches.clear();
+        ProcessBatches.clear();
+        ProcessCells.clear();
+        KeyToIndexes.clear();
 
         if (!PathLookupInfo.empty()) {
             // Need to lookup unique indexes.
@@ -2241,6 +2289,7 @@ private:
 
     THashMap<TPathId, TPathWriteInfo> PathWriteInfo;
     THashMap<TPathId, TPathLookupInfo> PathLookupInfo;
+    THashMap<TPathId, TPathLockInfo> PathLockInfo;
     std::optional<TReturningInfo> ReturningInfo;
 
     bool Closed = false;
@@ -3122,7 +3171,7 @@ public:
 
                     .LockTxId = LockTxId,
                     .LockNodeId = LockNodeId,
-                    .LockMode = settings.TransactionSettings.LockMode,
+                    .LockMode = NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE, // Writes always need EXCLUSIVE lock
                     .QuerySpanId = QuerySpanId,
                     .MvccSnapshot = settings.TransactionSettings.MvccSnapshot,
 
@@ -3165,7 +3214,9 @@ public:
                 actorInfo.WriteActor->SetCurrentQuerySpanId(settings.QuerySpanId);
             }
 
-            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE) 
+            // TODO: Do something about different LockModes in production ready Read Committed.
+            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
+                settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)
             {
                 auto& lockInfo = LockInfos[settings.TableId.PathId];
                 if (!lockInfo.Actors.contains(settings.TableId.PathId)) {
@@ -3441,6 +3492,25 @@ public:
                     /* preferAdditionalInputColumns */ false);
             }
 
+            std::vector<TKqpWriteTask::TPathLockInfo> locks;
+            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
+                    settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE) {
+                auto& lockInfo = LockInfos[settings.TableId.PathId];
+                if (lockInfo.Actors.contains(settings.TableId.PathId)) {
+                    auto lockActor = lockInfo.Actors.at(settings.TableId.PathId).LockActor;
+
+                    locks.emplace_back(TKqpWriteTask::TPathLockInfo{
+                        .KeyIndexes = {},
+                        .LockActor = lockActor,
+                    });
+
+                    lockActor->SetLockSettings(
+                        token.Cookie,
+                        settings.KeyColumns,
+                        settings.KeyColumns);
+                }
+            }
+
             auto [taskIter, _] = WriteTasks.emplace(
                 token.Cookie,
                 TKqpWriteTask{
@@ -3459,6 +3529,7 @@ public:
                             settings.DefaultColumns,
                             settings.Columns,
                             settings.LookupColumns),
+                    std::move(locks),
                     Alloc
                 });
 

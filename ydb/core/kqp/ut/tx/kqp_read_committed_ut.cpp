@@ -399,49 +399,49 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
     };
 
     Y_UNIT_TEST(TUpdateWhereTakesLocks) {
-        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul")", 1, 2, 1);
+        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` SET Comment = "Updated" WHERE Name == "Paul")", 1, 2, 2);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
 
     Y_UNIT_TEST(TDeleteWhereTakesLocks) {
-        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` WHERE Name == "Paul")", 1, 2, 1);
+        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` WHERE Name == "Paul")", 1, 2, 2);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
 
     Y_UNIT_TEST(TUpdateOnTakesLocks) {
-        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` ON (Group, Name, Comment) VALUES (1u, "Paul", "Updated"))", 0, 2, 0);
+        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test` ON (Group, Name, Comment) VALUES (1u, "Paul", "Updated"))", 0, 2, 1);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
 
     Y_UNIT_TEST(TDeleteOnTakesLocks) {
-        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` ON (Group, Name) VALUES (1u, "Paul"))", 0, 2, 0);
+        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test` ON (Group, Name) VALUES (1u, "Paul"))", 0, 2, 1);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
 
     Y_UNIT_TEST(TUpsertTakesLocks) {
-        TReadCommittedTakesLocks tester(R"(UPSERT INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Paul", "Upserted"))", 0, 2, 0);
+        TReadCommittedTakesLocks tester(R"(UPSERT INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Paul", "Upserted"))", 0, 2, 1);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
 
     Y_UNIT_TEST(TReplaceTakesLocks) {
-        TReadCommittedTakesLocks tester(R"(REPLACE INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Paul", "Replaced"))", 0, 2, 0);
+        TReadCommittedTakesLocks tester(R"(REPLACE INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Paul", "Replaced"))", 0, 2, 1);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
 
     Y_UNIT_TEST(TInsertTakesLocks) {
-        TReadCommittedTakesLocks tester(R"(INSERT INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Unknown", "Inserted"))", 0, 2, 0);
+        TReadCommittedTakesLocks tester(R"(INSERT INTO `/Root/Test` (Group, Name, Comment) VALUES (1u, "Unknown", "Inserted"))", 0, 2, 1);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();
