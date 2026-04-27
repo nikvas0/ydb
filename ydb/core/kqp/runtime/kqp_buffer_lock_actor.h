@@ -10,14 +10,14 @@ namespace NKqp {
 
 struct IKqpBufferTableLookupCallbacks;
 
+// Will be deleted after locks support in EvWrite
 class IKqpBufferTableLock {
 public:
     virtual ~IKqpBufferTableLock() = default;
 
     virtual void SetLockSettings(
         ui64 cookie,
-        TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> keyColumns,
-        TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> columns) = 0;
+        TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> keyColumns) = 0;
 
     virtual void AddLockTask(
         ui64 cookie,

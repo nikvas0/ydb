@@ -3215,8 +3215,8 @@ public:
             }
 
             // TODO: Do something about different LockModes in production ready Read Committed.
-            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
-                settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)
+            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE
+                || settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)
             {
                 auto& lockInfo = LockInfos[settings.TableId.PathId];
                 if (!lockInfo.Actors.contains(settings.TableId.PathId)) {
@@ -3285,6 +3285,26 @@ public:
                     } else {
                         if (!checkSchemaVersion(
                                 lookupInfo.Actors.at(indexSettings.TableId.PathId).LookupActor,
+                                indexSettings.TableId,
+                                indexSettings.TablePath)) {
+                            return;
+                        }
+                    }
+                }
+
+                if (indexSettings.IsUniq &&
+                        (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE
+                        || settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)) {
+                    auto& lockInfo = LockInfos[settings.TableId.PathId];
+                    if (!lockInfo.Actors.contains(settings.TableId.PathId)) {
+                        const auto [ptr, id] = createLockActor(settings.TableId, settings.TablePath);
+                        AFL_ENSURE(lockInfo.Actors.emplace(settings.TableId.PathId, TLockInfo::TActorInfo{
+                            .LockActor = ptr,
+                            .Id = id,
+                        }).second);
+                    } else {
+                        if (!checkSchemaVersion(
+                                lockInfo.Actors.at(indexSettings.TableId.PathId).LockActor,
                                 indexSettings.TableId,
                                 indexSettings.TablePath)) {
                             return;
@@ -3506,7 +3526,6 @@ public:
 
                     lockActor->SetLockSettings(
                         token.Cookie,
-                        settings.KeyColumns,
                         settings.KeyColumns);
                 }
             }

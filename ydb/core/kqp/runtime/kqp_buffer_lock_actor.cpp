@@ -139,8 +139,7 @@ public:
 
     void SetLockSettings(
             ui64 cookie,
-            TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> keyColumns,
-            TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> columns) override
+            TConstArrayRef<NKikimrKqp::TKqpColumnMetadataProto> keyColumns) override
     {
         TKqpStreamLockSettings lockSettings(Settings.HolderFactory);
         lockSettings.Table.SetOwnerId(Settings.TableId.PathId.OwnerId);
@@ -149,10 +148,7 @@ public:
 
         for (const auto& keyColumn : keyColumns) {
             lockSettings.KeyColumns.push_back(keyColumn);
-        }
-
-        for (const auto& column : columns) {
-            lockSettings.Columns.push_back(column);
+            lockSettings.Columns.push_back(keyColumn);
         }
 
         lockSettings.LockTxId = Settings.LockTxId;
@@ -345,15 +341,11 @@ public:
                     getIssues());
             }
             case NKikimrDataEvents::TEvLockRowsResult::STATUS_INTERNAL_ERROR: {
-                CA_LOG_D("STATUS_INTERNAL_ERROR from shard: " << shardId);
-                if (!RetryLockRequest(record.GetRequestId(), true)) {
-                    return RuntimeError(
-                        NYql::NDqProto::StatusIds::INTERNAL_ERROR,
-                        NYql::TIssuesIds::KIKIMR_INTERNAL_ERROR,
-                        TStringBuilder() << "Table: `" << Settings.TablePath << "` retry limit exceeded.",
-                        getIssues());
-                }
-                return;
+                return RuntimeError(
+                    NYql::NDqProto::StatusIds::INTERNAL_ERROR,
+                    NYql::TIssuesIds::KIKIMR_INTERNAL_ERROR,
+                    TStringBuilder() << "Internal error",
+                    getIssues());
             }
             case NKikimrDataEvents::TEvLockRowsResult::STATUS_BAD_REQUEST:
             case NKikimrDataEvents::TEvLockRowsResult::STATUS_WRONG_SHARD_STATE: {
