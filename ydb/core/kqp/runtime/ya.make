@@ -26,8 +26,6 @@ SRCS(
     kqp_stream_lookup_factory.h
     kqp_stream_lookup_worker.cpp
     kqp_stream_lookup_worker.h
-    kqp_stream_lock_actor.cpp
-    kqp_stream_lock_actor.h
     kqp_stream_lock_worker.cpp
     kqp_stream_lock_worker.h
     kqp_tasks_runner.cpp
