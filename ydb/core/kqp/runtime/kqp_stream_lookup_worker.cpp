@@ -150,21 +150,21 @@ public:
     virtual ~TKqpLookupRows() {}
 
     void AddInputRow(NUdf::TUnboxedValue inputRow) final {
-        const i32 lookupKeySize = std::min(Settings.KeyColumns.size(), Settings.InputColumns.size());
+        const size_t lookupKeySize = std::min(Settings.KeyColumns.size(), Settings.InputColumns.size());
         NMiniKQL::TStringProviderBackend backend;
         std::vector<TCell> keyCells(lookupKeySize);
         
-        for (i32 keyOrder = 0; keyOrder < lookupKeySize; ++keyOrder) {
-            //const auto& keyColumn = Settings.InputColumns[keyOrder];
-            //AFL_ENSURE(keyColumn.KeyOrder == keyOrder);
-
-            auto it = std::find_if(Settings.KeyColumns.begin(), Settings.KeyColumns.end(), // TODO: what???
-                [keyOrder](const auto& pair) { return pair.second.KeyOrder == keyOrder; });
-            YQL_ENSURE(it != Settings.KeyColumns.end(), "Key column not found for keyOrder: " << keyOrder);
-            const auto& keyColumn = it->second;
-            
-            keyCells[keyOrder] = MakeCell(keyColumn.PType,
-                inputRow.GetElement(keyOrder), backend, /* copy */ false);
+        for (size_t colId = 0; colId < Settings.InputColumns.size(); ++colId) {
+            const auto& lookupKeyColumn = Settings.InputColumns[colId];
+            if (0 <= lookupKeyColumn.KeyOrder) {
+                AFL_ENSURE(lookupKeyColumn.KeyOrder < static_cast<i64>(keyCells.size()));
+                // when making a cell we don't really need to make a copy of data, because
+                // TOwnedCellVec will make its' own copy.
+                keyCells[lookupKeyColumn.KeyOrder] = MakeCell(lookupKeyColumn.PType,
+                    inputRow.GetElement(colId), backend, /* copy */ false);
+            } else {
+                //AFL_ENSURE(Settings.LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK);
+            }
         }
 
         AddInputRowImpl(std::move(keyCells));
@@ -175,8 +175,14 @@ public:
         NMiniKQL::TStringProviderBackend backend;
         std::vector<TCell> keyCells(lookupKeySize);
         
-        for (i32 keyOrder = 0; keyOrder < lookupKeySize; ++keyOrder) {            
-            keyCells[keyOrder] = inputRow[keyOrder];
+        for (size_t colId = 0; colId < Settings.InputColumns.size(); ++colId) {
+            const auto& lookupKeyColumn = Settings.InputColumns[colId];
+            if (0 <= lookupKeyColumn.KeyOrder) {
+                AFL_ENSURE(lookupKeyColumn.KeyOrder < static_cast<i64>(keyCells.size()));
+                keyCells[lookupKeyColumn.KeyOrder] = inputRow[colId];
+            } else {
+               // AFL_ENSURE(Settings.LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK);
+            }
         }
 
         AddInputRowImpl(std::move(keyCells));
