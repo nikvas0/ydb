@@ -830,8 +830,6 @@ public:
     }
 
     void CompileStatement() {
-
-        Cerr << "TEST >> Compile STATEMENT --- " << Endl;
         // quick path
         if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId()) && !QueryState->CompileResult->NeedToSplit) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
@@ -986,8 +984,6 @@ public:
             co_return ReplyPrepareResult();
         }
 
-        Cerr << "COMPILED " << QueryState->CompileResult->PreparedQuery->GetPhysicalQuery().GetQueryAst() << Endl;
-
         if (QueryState->GetAction() == NKikimrKqp::QUERY_ACTION_PREPARE) {
             co_return ReplyPrepareResult();
         }
@@ -1004,12 +1000,10 @@ public:
             co_return;
         }
 
-        Cerr << "TET >> CHECK IF NEED SNAPSHOT " << Endl;
         if (QueryState->NeedPersistentSnapshot()) {
             AcquirePersistentSnapshot();
             co_return;
         } else if (QueryState->NeedSnapshot(*Config)) {
-            Cerr << "TET >> GET SNAPSHOT " << Endl;
             AcquireMvccSnapshot();
             co_return;
         }
@@ -1041,7 +1035,6 @@ public:
     }
 
     void AcquireMvccSnapshot() {
-        Cerr << "TEST >> " << SelfId() << " --- " << "AcquireMvccSnapshot" << Endl;
         AcquireSnapshotSpan = NWilson::TSpan(TWilsonKqp::SessionAcquireSnapshot, QueryState->KqpSessionSpan.GetTraceId(),
             "SessionActor.AcquireMvccSnapshot");
         STLOG_D("Acquire mvcc snapshot",
@@ -1094,7 +1087,6 @@ public:
             return;
         }
         AcquireSnapshotSpan.EndOk();
-        Cerr << "TEST >> " << "UPDATED SNAPSHOT" << Endl;
         QueryState->TxCtx->SnapshotHandle.Snapshot = response->Snapshot;
 
         // Can reply inside (in case of deferred-only transactions) and become ReadyState
