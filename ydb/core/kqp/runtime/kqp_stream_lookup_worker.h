@@ -23,7 +23,6 @@ struct TLookupSettings {
     std::unordered_map<TString, TSysTables::TTableColumnInfo> KeyColumns;
     std::vector<TSysTables::TTableColumnInfo> InputColumns;
     std::vector<TSysTables::TTableColumnInfo> Columns;
-    std::vector<size_t> KeyColumnInputPositions;
 };
 
 class TKqpStreamLookupWorker {
