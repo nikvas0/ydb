@@ -335,10 +335,9 @@ public:
         record.SetLockTxId(Settings.LockTxId);
         record.SetLockNodeId(Settings.LockNodeId);
 
-        AFL_ENSURE(!isUniqueCheck || Settings.LockMode != NKikimrDataEvents::PESSIMISTIC_NONE);
-        record.SetLockMode(!isUniqueCheck
-            ? Settings.LockMode
-            : NKikimrDataEvents::OPTIMISTIC);
+        record.SetLockMode((isUniqueCheck && Settings.LockMode == NKikimrDataEvents::OPTIMISTIC_SNAPSHOT_ISOLATION)
+            ? NKikimrDataEvents::OPTIMISTIC // Workaround for Snapshot Isolation with Unique Index
+            : Settings.LockMode);
         if (Settings.QuerySpanId) {
             record.SetQuerySpanId(Settings.QuerySpanId);
         }

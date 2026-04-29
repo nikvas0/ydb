@@ -70,8 +70,18 @@ void TKqpStreamLockWorker::AddInputRow(NUdf::TUnboxedValue row) {
 }
 
 void TKqpStreamLockWorker::AddInputRow(TConstArrayRef<TCell> inputRow) {
-    AFL_ENSURE(inputRow.size() == ColumnTypes.size());
-    InputRows.emplace_back(TOwnedCellVec::Make(inputRow));
+    if (inputRow.size() != ColumnTypes.size()) {
+        // TODO: tmp workaround for unique index locking
+        TVector<TCell> cells(inputRow.begin(), inputRow.end());
+        while (cells.size() < ColumnTypes.size()) {
+            cells.push_back(TCell());
+        }
+
+        InputRows.emplace_back(TOwnedCellVec::Make(cells));
+    } else {
+        AFL_ENSURE(inputRow.size() == ColumnTypes.size());
+        InputRows.emplace_back(TOwnedCellVec::Make(inputRow));
+    }
 }
 
 TVector<TCell> TKqpStreamLockWorker::SerializeKeysToCellVec(const std::vector<TOwnedCellVec>& keys) {

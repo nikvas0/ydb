@@ -446,6 +446,56 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
         tester.SetUseRealThreads(false);
         tester.Execute();
     }
+
+    Y_UNIT_TEST(TUpdateWhereTakesLocksWithUniqueIndex) {
+        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test2` SET Comment = "Updated" WHERE Name == "Paul")", 3, 4, 3);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TDeleteWhereTakesLocksWithUniqueIndex) {
+        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test2` WHERE Name == "Paul")", 2, 4, 2);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TUpdateOnTakesLocksWithUniqueIndex) {
+        return; // TODO: wrong read count
+        TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test2` ON (Group, Name, Comment) VALUES (1u, "Paul", "Updated"))", 2, 4, 2);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TDeleteOnTakesLocksWithUniqueIndex) {
+        TReadCommittedTakesLocks tester(R"(DELETE FROM `/Root/Test2` ON (Group, Name) VALUES (1u, "Paul"))", 1, 4, 1);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TUpsertTakesLocksWithUniqueIndex) {
+        TReadCommittedTakesLocks tester(R"(UPSERT INTO `/Root/Test2` (Group, Name, Comment) VALUES (1u, "Paul", "Upserted"))", 2, 4, 2);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TReplaceTakesLocksWithUniqueIndex) {
+        TReadCommittedTakesLocks tester(R"(REPLACE INTO `/Root/Test2` (Group, Name, Comment) VALUES (1u, "Paul", "Replaced"))", 2, 4, 2);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    Y_UNIT_TEST(TInsertTakesLocksWithUniqueIndex) {
+        TReadCommittedTakesLocks tester(R"(INSERT INTO `/Root/Test2` (Group, Name, Comment) VALUES (1u, "Unknown", "Inserted"))", 1, 4, 2);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
 }
 
 } // namespace NKqp

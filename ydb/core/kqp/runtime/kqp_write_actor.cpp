@@ -1677,7 +1677,10 @@ public:
         }
 
         for (const auto& lock : locks) {
+            AFL_ENSURE(PathLookupInfo.contains(lock.LockActor->GetTableId().PathId)
+                    || PathWriteInfo.contains(lock.LockActor->GetTableId().PathId));
             PathLockInfo[lock.LockActor->GetTableId().PathId] = lock;
+            AFL_ENSURE(lock.KeyIndexes.empty());
         }
 
         ReturningInfo = returning;
@@ -1850,15 +1853,15 @@ private:
                     Cookie,
                     std::vector<TConstArrayRef<TCell>>(primaryKeysSet.begin(), primaryKeysSet.end()));
                 State = EState::LOCK_MAIN_TABLE;
+                return true;
             } else {
                 AFL_ENSURE(needLookup);
                 auto& lookupInfo = PathLookupInfo.at(PathId);
                 lookupInfo.Lookup->AddLookupTask(
                     Cookie, std::vector<TConstArrayRef<TCell>>(primaryKeysSet.begin(), primaryKeysSet.end()));
                 State = EState::LOOKUP_MAIN_TABLE;
+                return true;
             }
-
-            return true;
         }
 
         // TODO: remove !PathLookupInfo.empty() after full error support
@@ -2010,12 +2013,14 @@ private:
     bool StartUniqueIndexLock() {
         for (auto& [pathId, lockInfo] : PathLockInfo) {
             if (pathId != PathId) {
+                const auto& lookupInfo = PathLookupInfo.at(pathId);
+
                 TUniqueSecondaryKeyCollector collector(
                     KeyColumnTypes,
-                    lockInfo.LockActor->GetKeyColumnTypes(),
-                    lockInfo.KeyIndexes,
-                    lockInfo.KeyIndexes,
-                    std::vector<ui32>{});
+                    lookupInfo.Lookup->GetKeyColumnTypes(),
+                    lookupInfo.KeyIndexes,
+                    lookupInfo.FullKeyIndexes,
+                    lookupInfo.PrimaryInFullKeyIndexes);
                 for (const auto& write : Writes) {
                     for (const auto& row : GetRows(write.Batch)) {
                         if (!collector.AddRow(row)) {
@@ -3359,6 +3364,7 @@ public:
 
             std::vector<TKqpWriteTask::TPathWriteInfo> writes;
             std::vector<TKqpWriteTask::TPathLookupInfo> lookups;
+            std::vector<TKqpWriteTask::TPathLockInfo> locks;
 
             AFL_ENSURE(writeInfo.Actors.size() > settings.Indexes.size());
             for (auto& indexSettings : settings.Indexes) {
@@ -3433,54 +3439,87 @@ public:
                 });
 
                 if (indexSettings.IsUniq) {
-                    auto lookupInfo = LookupInfos.at(indexSettings.TableId.PathId);
-                    auto lookupActor = lookupInfo.Actors.at(indexSettings.TableId.PathId).LookupActor;
-                    lookups.emplace_back(TKqpWriteTask::TPathLookupInfo{
-                        .KeyIndexes = GetIndexes( // inserted secondary keys
-                            settings.Columns,
-                            settings.LookupColumns,
-                            TConstArrayRef{
-                                indexSettings.KeyColumns.data(),
-                                indexSettings.KeyPrefixSize},
-                            /* preferAdditionalInputColumns */ false),
-                        .FullKeyIndexes = GetIndexes( // full secondary table keys
-                            settings.Columns,
-                            settings.LookupColumns,
-                            indexSettings.KeyColumns,
-                            /* preferAdditionalInputColumns */ false),
-                        .PrimaryInFullKeyIndexes = [&](){ // primary key in full secondary table keys
-                            THashMap<TStringBuf, ui32> ColumnNameToIndex;
-                            for (ui32 index = 0; index < indexSettings.KeyColumns.size(); ++index) {
-                                ColumnNameToIndex[indexSettings.KeyColumns[index].GetName()] = index;
-                            }
-                            std::vector<ui32> result(settings.KeyColumns.size());
-                            for (ui32 index = 0; index < settings.KeyColumns.size(); ++index) {
-                                result[index] = ColumnNameToIndex[settings.KeyColumns[index].GetName()];
-                            }
-                            return result;
-                        }(),
-                        .OldKeyIndexes = GetIndexes( // old secondary keys
+                    if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
+                            settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE) {
+                        // Lock Unique Index
+                        auto& indexLockInfo = LockInfos.at(indexSettings.TableId.PathId);
+                        auto& lockActor = indexLockInfo.Actors.at(indexSettings.TableId.PathId).LockActor;
+
+                        locks.emplace_back(TKqpWriteTask::TPathLockInfo{
+                            .KeyIndexes = {},
+                            .LockActor = lockActor,
+                        });
+
+                        lockActor->SetLockSettings(
+                            token.Cookie,
+                            indexSettings.KeyColumns);
+                    }
+
+                    {
+                        // Lookup Unique Index
+                        auto lookupInfo = LookupInfos.at(indexSettings.TableId.PathId);
+                        auto lookupActor = lookupInfo.Actors.at(indexSettings.TableId.PathId).LookupActor;
+                        lookups.emplace_back(TKqpWriteTask::TPathLookupInfo{
+                            .KeyIndexes = GetIndexes( // inserted secondary keys
                                 settings.Columns,
                                 settings.LookupColumns,
                                 TConstArrayRef{
                                     indexSettings.KeyColumns.data(),
                                     indexSettings.KeyPrefixSize},
-                                /* preferAdditionalInputColumns */ true),
-                        .Lookup = lookupActor,
-                    });
+                                /* preferAdditionalInputColumns */ false),
+                            .FullKeyIndexes = GetIndexes( // full secondary table keys
+                                settings.Columns,
+                                settings.LookupColumns,
+                                indexSettings.KeyColumns,
+                                /* preferAdditionalInputColumns */ false),
+                            .PrimaryInFullKeyIndexes = [&](){ // primary key in full secondary table keys
+                                THashMap<TStringBuf, ui32> ColumnNameToIndex;
+                                for (ui32 index = 0; index < indexSettings.KeyColumns.size(); ++index) {
+                                    ColumnNameToIndex[indexSettings.KeyColumns[index].GetName()] = index;
+                                }
+                                std::vector<ui32> result(settings.KeyColumns.size());
+                                for (ui32 index = 0; index < settings.KeyColumns.size(); ++index) {
+                                    result[index] = ColumnNameToIndex[settings.KeyColumns[index].GetName()];
+                                }
+                                return result;
+                            }(),
+                            .OldKeyIndexes = GetIndexes( // old secondary keys
+                                    settings.Columns,
+                                    settings.LookupColumns,
+                                    TConstArrayRef{
+                                        indexSettings.KeyColumns.data(),
+                                        indexSettings.KeyPrefixSize},
+                                    /* preferAdditionalInputColumns */ true),
+                            .Lookup = lookupActor,
+                        });
 
-                    lookupActor->SetLookupSettings(
-                        token.Cookie,
-                        indexSettings.KeyPrefixSize,
-                        indexSettings.KeyColumns,
-                        {});
+                        lookupActor->SetLookupSettings(
+                            token.Cookie,
+                            indexSettings.KeyPrefixSize,
+                            indexSettings.KeyColumns,
+                            {});
+                    }
                 }
+            }
+            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
+                    settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE) {
+                auto& lockInfo = LockInfos.at(settings.TableId.PathId);
+                auto& lockActor = lockInfo.Actors.at(settings.TableId.PathId).LockActor;
+
+                locks.emplace_back(TKqpWriteTask::TPathLockInfo{
+                    .KeyIndexes = {},
+                    .LockActor = lockActor,
+                });
+
+                lockActor->SetLockSettings(
+                    token.Cookie,
+                    settings.KeyColumns);
             }
 
             if (!settings.LookupColumns.empty()) {
                 AFL_ENSURE(!settings.IsOlap);
-                auto lookupInfo = LookupInfos.at(settings.TableId.PathId);
-                auto lookupActor = lookupInfo.Actors.at(settings.TableId.PathId).LookupActor;
+                auto& lookupInfo = LookupInfos.at(settings.TableId.PathId);
+                auto& lookupActor = lookupInfo.Actors.at(settings.TableId.PathId).LookupActor;
                 lookups.emplace_back(TKqpWriteTask::TPathLookupInfo{
                     .KeyIndexes = {},
                     .FullKeyIndexes = {},
@@ -3545,42 +3584,6 @@ public:
                     settings.LookupColumns,
                     settings.ReturningColumns,
                     /* preferAdditionalInputColumns */ false);
-            }
-
-            std::vector<TKqpWriteTask::TPathLockInfo> locks;
-            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
-                    settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE) {
-                auto& lockInfo = LockInfos[settings.TableId.PathId];
-                if (lockInfo.Actors.contains(settings.TableId.PathId)) {
-                    auto lockActor = lockInfo.Actors.at(settings.TableId.PathId).LockActor;
-
-                    locks.emplace_back(TKqpWriteTask::TPathLockInfo{
-                        .KeyIndexes = {},
-                        .LockActor = lockActor,
-                    });
-
-                    lockActor->SetLockSettings(
-                        token.Cookie,
-                        settings.KeyColumns);
-                }
-
-                for (const auto& indexSettings : settings.Indexes) {
-                    if (indexSettings.IsUniq) {
-                        auto& indexLockInfo = LockInfos[indexSettings.TableId.PathId];
-                        if (indexLockInfo.Actors.contains(indexSettings.TableId.PathId)) {
-                            auto lockActor = indexLockInfo.Actors.at(indexSettings.TableId.PathId).LockActor;
-
-                            locks.emplace_back(TKqpWriteTask::TPathLockInfo{
-                                .KeyIndexes = {},
-                                .LockActor = lockActor,
-                            });
-
-                            lockActor->SetLockSettings(
-                                token.Cookie,
-                                indexSettings.KeyColumns);
-                        }
-                    }
-                }
             }
 
             auto [taskIter, _] = WriteTasks.emplace(
