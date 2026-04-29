@@ -10,7 +10,7 @@ namespace NKqp {
 
 struct IKqpBufferTableLookupCallbacks;
 
-// Will be deleted after locks support in EvWrite
+// Will be deleted after locks support in EvWrite and EvRead
 class IKqpBufferTableLock {
 public:
     virtual ~IKqpBufferTableLock() = default;
