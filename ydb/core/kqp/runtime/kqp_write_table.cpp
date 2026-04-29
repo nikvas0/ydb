@@ -1159,7 +1159,6 @@ TUniqueSecondaryKeyCollector::TUniqueSecondaryKeyCollector(
         , SecondaryKeyColumns(secondaryKeyColumns)
         , SecondaryTableKeyColumns(secondaryTableKeyColumns)
         , PrimaryKeyInSecondaryTableKeyColumns(primaryKeyInSecondaryTableKeyColumns) {
-    Cerr << "TEST >> PK IN SK " << PrimaryKeyInSecondaryTableKeyColumns.size() << " " << PrimaryKeyColumnTypes.size() << Endl;
     AFL_ENSURE(PrimaryKeyInSecondaryTableKeyColumns.size() == PrimaryKeyColumnTypes.size());
     AFL_ENSURE(PrimaryKeyInSecondaryTableKeyColumns.size() <= SecondaryKeyColumnTypes.size());
     AFL_ENSURE(SecondaryTableKeyColumns.size() == SecondaryKeyColumnTypes.size());

@@ -3254,9 +3254,7 @@ public:
                 actorInfo.WriteActor->SetCurrentQuerySpanId(settings.QuerySpanId);
             }
 
-            // TODO: Do something about different LockModes in production ready Read Committed.
-            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE
-                || settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)
+            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE)
             {
                 auto& lockInfo = LockInfos[settings.TableId.PathId];
                 if (!lockInfo.Actors.contains(settings.TableId.PathId)) {
@@ -3333,8 +3331,7 @@ public:
                 }
 
                 if (indexSettings.IsUniq &&
-                        (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE
-                        || settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE)) {
+                        (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE)) {
                     auto& lockInfo = LockInfos[indexSettings.TableId.PathId];
                     if (!lockInfo.Actors.contains(indexSettings.TableId.PathId)) {
                         const auto [ptr, id] = createLockActor(indexSettings.TableId, indexSettings.TablePath);
@@ -3439,8 +3436,7 @@ public:
                 });
 
                 if (indexSettings.IsUniq) {
-                    if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
-                            settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE) {
+                    if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE) {
                         // Lock Unique Index
                         auto& indexLockInfo = LockInfos.at(indexSettings.TableId.PathId);
                         auto& lockActor = indexLockInfo.Actors.at(indexSettings.TableId.PathId).LockActor;
@@ -3501,8 +3497,7 @@ public:
                     }
                 }
             }
-            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE ||
-                    settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE) {
+            if (settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE) {
                 auto& lockInfo = LockInfos.at(settings.TableId.PathId);
                 auto& lockActor = lockInfo.Actors.at(settings.TableId.PathId).LockActor;
 

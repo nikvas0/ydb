@@ -63,8 +63,6 @@ public:
             AFL_ENSURE(IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW);
             AFL_ENSURE(LockMode);
             AFL_ENSURE(*LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE);
-            Cerr << "DEBUG: Creating StreamLockWorker. LockMode: " << (LockMode ? NKikimrDataEvents::ELockMode_Name(*LockMode) : "none")
-                 << ", IsolationLevel: " << (int)IsolationLevel << Endl;
             TKqpStreamLockSettings lockSettings(args.HolderFactory);
             lockSettings.Table = settings.GetTable();
             for (const auto& col : settings.GetKeyColumns()) {
@@ -849,7 +847,6 @@ private:
     }
 
     void ProcessInputRows() {
-        Cerr << "DEBUG: ProcessInputRows called. Partitioning: " << (bool)Partitioning << Endl;
         YQL_ENSURE(Partitioning, "Table partitioning should be initialized before lookup keys processing");
 
         auto guard = BindAllocator();
@@ -860,12 +857,10 @@ private:
         }
 
         if (StreamLockWorker) {
-            Cerr << "DEBUG: ProcessInputRows - StreamLockWorker exists, calling BuildLockRequests" << Endl;
             AFL_ENSURE(LockMode && (*LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_EXCLUSIVE
                 || (*LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE // TODO: delete
                     && IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW)));
             auto lockRequests = StreamLockWorker->BuildLockRequests(Partitioning, OperationId);
-            Cerr << "DEBUG: ProcessInputRows - lockRequests count: " << lockRequests.size() << Endl;
             for (auto& [shardId, request] : lockRequests) {
                 SendLockRequest(shardId, std::move(request));
             }
@@ -874,7 +869,6 @@ private:
 
     void SendLockRequest(ui64 shardId, THolder<NEvents::TDataEvents::TEvLockRows> request) {
         CA_LOG_D("Send lock request to shard: " << shardId);
-        Cerr << "DEBUG: SendLockRequest called. SelfId: " << SelfId() << ", shardId: " << shardId << Endl;
 
         ui64 requestId = request->Record.GetRequestId();
 
@@ -897,7 +891,6 @@ private:
     }
 
     void Handle(NEvents::TDataEvents::TEvLockRowsResult::TPtr& ev) {
-        Cerr << "DEBUG: Handle TEvLockRowsResult called! Sender: " << ev->Sender << ", Recipient: " << ev->Recipient << Endl;
         const auto& record = ev->Get()->Record;
 
         CA_LOG_D("Received lock result, requestId: " << record.GetRequestId() 
@@ -905,7 +898,6 @@ private:
 
         if (record.GetStatus() != NKikimrDataEvents::TEvLockRowsResult::STATUS_SUCCESS) {
             TString errorMsg = TStringBuilder() << "Lock request failed with status: " << record.GetStatus();
-            Cerr << "DEBUG: Lock failed with status: " << record.GetStatus() << Endl;
             RuntimeError(errorMsg, NYql::NDqProto::StatusIds::ABORTED);
             return;
         }
@@ -916,10 +908,8 @@ private:
         }
 
         ui64 requestId = record.GetRequestId();
-        Cerr << "DEBUG: HandleLockResult received for requestId: " << requestId << Endl;
         StreamLockWorker->AddLockResult(requestId, ev->Get());
 
-        Cerr << "DEBUG: After AddLockResult, calling ProcessRowsByLockResult" << Endl;
         bool hasModifiedRows = false;
         bool hasUnmodifiedRows = false;
         StreamLockWorker->ProcessRowsByLockResult(requestId, 
@@ -931,18 +921,14 @@ private:
                 } else {
                     UnmodifiedOutputRows.emplace_back(std::move(row));
                     hasUnmodifiedRows = true;
-                    Cerr << "DEBUG: Added row to UnmodifiedOutputRows (READ_COMMITTED_RW mode)" << Endl;
                 }
             });
-
-        Cerr << "DEBUG: hasModifiedRows=" << hasModifiedRows << ", hasUnmodifiedRows=" << hasUnmodifiedRows << Endl;
 
         if (hasModifiedRows) {
             ProcessInputRows();
         }
         
         if (hasUnmodifiedRows) {
-            Cerr << "DEBUG: Sending TEvNewAsyncInputDataArrived for locked rows" << Endl;
             Send(ComputeActorId, new TEvNewAsyncInputDataArrived(InputIndex));
         }
 
@@ -1083,7 +1069,6 @@ private:
         ++TotalRetryAttempts;
 
         if (Reads.CheckShardRetriesExeededLock(failedLock)) {
-            // TODO: reset rows processing???
             Reads.eraseLock(failedLock);
             return ResolveTableShards();
         }
