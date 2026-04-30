@@ -202,6 +202,7 @@ public:
                         keyColumn.GetId(),
                         typeInfo,
                         keyColumn.GetTypeInfo().GetPgTypeMod(),
+                        static_cast<i32>(index)
                     }
                 );
             }

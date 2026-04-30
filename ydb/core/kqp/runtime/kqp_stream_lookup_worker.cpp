@@ -153,7 +153,7 @@ public:
         const size_t lookupKeySize = std::min(Settings.KeyColumns.size(), Settings.InputColumns.size());
         NMiniKQL::TStringProviderBackend backend;
         std::vector<TCell> keyCells(lookupKeySize);
-        
+
         for (size_t colId = 0; colId < Settings.InputColumns.size(); ++colId) {
             const auto& lookupKeyColumn = Settings.InputColumns[colId];
             if (0 <= lookupKeyColumn.KeyOrder) {
@@ -163,7 +163,7 @@ public:
                 keyCells[lookupKeyColumn.KeyOrder] = MakeCell(lookupKeyColumn.PType,
                     inputRow.GetElement(colId), backend, /* copy */ false);
             } else {
-                //AFL_ENSURE(Settings.LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK);
+                AFL_ENSURE(Settings.LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK);
             }
         }
 
@@ -181,7 +181,7 @@ public:
                 AFL_ENSURE(lookupKeyColumn.KeyOrder < static_cast<i64>(keyCells.size()));
                 keyCells[lookupKeyColumn.KeyOrder] = inputRow[colId];
             } else {
-               // AFL_ENSURE(Settings.LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK);
+                AFL_ENSURE(Settings.LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK);
             }
         }
 
@@ -1292,11 +1292,13 @@ std::unique_ptr<TKqpStreamLookupWorker> CreateStreamLookupWorker(NKikimrKqp::TKq
     preparedSettings.InputColumns.reserve(settings.GetInputColumns().size());
     for (const auto& inputColumn : settings.GetInputColumns()) {
         NScheme::TTypeInfo typeInfo = NScheme::TypeInfoFromProto(inputColumn.GetTypeId(), inputColumn.GetTypeInfo());
+        auto itKey = preparedSettings.KeyColumns.find(inputColumn.GetName());
         preparedSettings.InputColumns.emplace_back(TSysTables::TTableColumnInfo{
             inputColumn.GetName(),
             inputColumn.GetId(),
             typeInfo,
-            inputColumn.GetTypeInfo().GetPgTypeMod()
+            inputColumn.GetTypeInfo().GetPgTypeMod(),
+            itKey == std::end(preparedSettings.KeyColumns) ? -1 : itKey->second.KeyOrder
         });
 
         AFL_ENSURE(preparedSettings.LookupStrategy == NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK

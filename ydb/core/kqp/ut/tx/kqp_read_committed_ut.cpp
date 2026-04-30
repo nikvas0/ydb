@@ -462,7 +462,6 @@ Y_UNIT_TEST_SUITE(KqpReadCommitted) {
     }
 
     Y_UNIT_TEST(TUpdateOnTakesLocksWithUniqueIndex) {
-        return; // TODO: wrong read count
         TReadCommittedTakesLocks tester(R"(UPDATE `/Root/Test2` ON (Group, Name, Comment) VALUES (1u, "Paul", "Updated"))", 2, 4, 2);
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
