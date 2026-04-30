@@ -26,6 +26,7 @@ public:
     void Execute() {
         auto settings = TKikimrSettings().SetWithSampleTables(false).SetUseRealThreads(UseRealThreads);
         settings.AppConfig.MutableTableServiceConfig()->SetEnableSnapshotIsolationRW(true);
+        settings.AppConfig.MutableTableServiceConfig()->SetEnableReadCommittedIsolation(true);
         if (FastSnapshotExpiration) {
             settings.SetKeepSnapshotTimeout(TDuration::Seconds(1));
         }

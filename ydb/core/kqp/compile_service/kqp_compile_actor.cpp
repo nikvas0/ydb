@@ -87,7 +87,7 @@ public:
         , IsolationLevel(isolationLevel)
     {
         Config = BuildConfiguration(tableServiceConfig);
-        PerStatementResult = (isolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) || (perStatementResult && Config->GetEnablePerStatementQueryExecution());
+        PerStatementResult = (IsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW) || (perStatementResult && Config->GetEnablePerStatementQueryExecution());
     }
 
     TKikimrConfiguration::TPtr BuildConfiguration(const TTableServiceConfig& tableServiceConfig) {
@@ -287,6 +287,11 @@ private:
             new TEvents::TEvWakeup()));
 
         TYqlLogScope logScope(ctx, NKikimrServices::KQP_YQL, YqlName, UserRequestContext->TraceId);
+
+        if (IsolationLevel == NKqpProto::ISOLATION_LEVEL_READ_COMMITTED_RW && !Config->GetEnableReadCommittedIsolation()) {
+            NYql::TIssue issue(NYql::TPosition(), "Read Committed isolation level is not supported.");
+            return ReplyError(Ydb::StatusIds::BAD_REQUEST, {issue});
+        }
 
         auto prepareSettings = PrepareCompilationSettings(ctx);
         StartCompilationWithSettings(prepareSettings);
