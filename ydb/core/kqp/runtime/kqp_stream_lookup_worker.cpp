@@ -546,8 +546,9 @@ public:
         , InputRowSeqNoLast((taskId + 1) << SEQNO_SPACE)
     {
         YQL_ENSURE(taskId < MaxTaskId);
-        for (const auto& [keyName, keyColumn] : Settings.KeyColumns) {
-            ReadColumns.emplace(keyName, keyColumn);
+        // read columns should contain join key and result columns
+        for (const auto& joinKey : Settings.InputColumns) {
+            ReadColumns.emplace(joinKey.Name, joinKey);
         }
 
         for (auto column : Settings.Columns) {
@@ -565,7 +566,7 @@ public:
 
     void AddInputRow(NUdf::TUnboxedValue inputRow) final {
         auto joinKey = inputRow.GetElement(1);
-        std::vector<TCell> joinKeyCells(Settings.KeyColumns.size());
+        std::vector<TCell> joinKeyCells(Settings.InputColumns.size());
         NMiniKQL::TStringProviderBackend backend;
 
         ui64 rowSeqNo;
@@ -583,10 +584,13 @@ public:
         }
 
         if (joinKey.HasValue()) {
-            for (const auto& [keyName, keyColumn] : Settings.KeyColumns) {
-                YQL_ENSURE(keyColumn.KeyOrder < static_cast<i64>(joinKeyCells.size()));
-                joinKeyCells[keyColumn.KeyOrder] = MakeCell(keyColumn.PType,
-                    joinKey.GetElement(keyColumn.KeyOrder), backend,  /* copy */ false);
+            for (size_t colId = 0; colId < Settings.InputColumns.size(); ++colId) {
+                const auto& joinKeyColumn = Settings.InputColumns[colId];
+                YQL_ENSURE(joinKeyColumn.KeyOrder < static_cast<i64>(joinKeyCells.size()));
+                // when making a cell we don't really need to make a copy of data, because
+                // TOwnedCellVec will make its' own copy.
+                joinKeyCells[joinKeyColumn.KeyOrder] = MakeCell(joinKeyColumn.PType,
+                    joinKey.GetElement(colId), backend,  /* copy */ false);
             }
         }
 
@@ -862,11 +866,11 @@ public:
             // result can contain fewer columns because of system columns
             YQL_ENSURE(row.size() <= ReadColumns.size(), "Result columns mismatch");
 
-            std::vector<TCell> joinKeyCells(Settings.KeyColumns.size());
-            for (const auto& [keyName, keyColumn] : Settings.KeyColumns) {
-                auto columnIt = ReadColumns.find(keyName);
+            std::vector<TCell> joinKeyCells(Settings.InputColumns.size());
+            for (size_t joinKeyColumn = 0; joinKeyColumn < Settings.InputColumns.size(); ++joinKeyColumn) {
+                auto columnIt = ReadColumns.find(Settings.InputColumns[joinKeyColumn].Name);
                 YQL_ENSURE(columnIt != ReadColumns.end());
-                joinKeyCells[keyColumn.KeyOrder] = row[std::distance(ReadColumns.begin(), columnIt)];
+                joinKeyCells[Settings.InputColumns[joinKeyColumn].KeyOrder] = row[std::distance(ReadColumns.begin(), columnIt)];
             }
 
             auto leftRowIt = PendingLeftRowsByKey.find(joinKeyCells);
@@ -1198,11 +1202,11 @@ private:
     }
 
     TConstArrayRef<TCell> ExtractKeyPrefix(const TOwnedTableRange& range) {
-        if (range.From.size() == Settings.KeyColumns.size()) {
+        if (range.From.size() == Settings.InputColumns.size()) {
             return range.From;
         }
 
-        return range.From.subspan(0, Settings.KeyColumns.size());
+        return range.From.subspan(0, Settings.InputColumns.size());
     }
 
     bool IsInputTriplet() {
