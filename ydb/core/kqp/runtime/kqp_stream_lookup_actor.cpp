@@ -626,7 +626,7 @@ private:
         TotalBytesQuota -= MaxBytesDefaultQuota;
         Counters->StreamLookupIteratorTotalQuotaBytesInFlight->Sub(MaxBytesDefaultQuota);
 
-        if (!Snapshot.IsValid()) {
+        if (!Snapshot.IsValid() && LookupStrategy != NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK) {
             Snapshot = IKqpGateway::TKqpSnapshot(record.GetSnapshot().GetStep(), record.GetSnapshot().GetTxId());
         }
 
@@ -896,14 +896,71 @@ private:
         CA_LOG_D("Received lock result, requestId: " << record.GetRequestId() 
             << ", status: " << record.GetStatus());
 
-        if (record.GetStatus() != NKikimrDataEvents::TEvLockRowsResult::STATUS_SUCCESS) {
-            TString errorMsg = TStringBuilder() << "Lock request failed with status: " << record.GetStatus();
-            RuntimeError(errorMsg, NYql::NDqProto::StatusIds::ABORTED);
-            return;
+        auto getIssues = [&record]() {
+            NYql::TIssues issues;
+            NYql::IssuesFromMessage(record.GetIssues(), issues);
+            return issues;
+        };
+
+        switch (record.GetStatus()) {
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_SUCCESS:
+                break;
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_LOCKS_BROKEN: {
+                CA_LOG_D("STATUS_LOCKS_BROKEN from shard: " << record.GetTabletId());
+                return RuntimeError(
+                    TStringBuilder() << "Table: `" << StreamLookupWorker->GetTablePath() << "`. Locks Invalidated.",
+                    NYql::NDqProto::StatusIds::ABORTED,
+                    getIssues());
+            }
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_OVERLOADED: {
+                CA_LOG_D("STATUS_OVERLOADED from shard: " << record.GetTabletId());
+                auto lockIt = Reads.findLock(record.GetRequestId());
+                AFL_ENSURE(lockIt != Reads.endLocks());
+                return RetryLock(lockIt->second, false);
+            }
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_DEADLOCK: {
+                CA_LOG_D("STATUS_DEADLOCK from shard: " << record.GetTabletId());
+                return RuntimeError(
+                    TStringBuilder() << "Table: `" << StreamLookupWorker->GetTablePath() << "`. " << "Deadlock detected",
+                    NYql::NDqProto::StatusIds::ABORTED,
+                    getIssues());
+            }
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_SCHEME_ERROR:
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_SCHEME_CHANGED: {
+                return RuntimeError(
+                    TStringBuilder() << "Table: `" << StreamLookupWorker->GetTablePath() << "`. " << "Scheme error",
+                    NYql::NDqProto::StatusIds::SCHEME_ERROR,
+                    getIssues());
+            }
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_INTERNAL_ERROR: {
+                return RuntimeError(
+                    TStringBuilder() << "Table: `" << StreamLookupWorker->GetTablePath() << "`. " << "Internal error",
+                    NYql::NDqProto::StatusIds::INTERNAL_ERROR,
+                    getIssues());
+            }
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_BAD_REQUEST: {
+                return RuntimeError(
+                    TStringBuilder() << "Table: `" << StreamLookupWorker->GetTablePath() << "`. " << "Bad request",
+                    NYql::NDqProto::StatusIds::BAD_REQUEST,
+                    getIssues());
+            }
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_WRONG_SHARD_STATE: {
+                return RuntimeError(
+                    TStringBuilder() << "Table: `" << StreamLookupWorker->GetTablePath() << "`. " << "Wrong shard state.",
+                    NYql::NDqProto::StatusIds::UNAVAILABLE,
+                    getIssues());
+            }
+            default: {
+                return RuntimeError(
+                    TStringBuilder() << "Table: `" << StreamLookupWorker->GetTablePath() << "`. " << "Lock request aborted",
+                    NYql::NDqProto::StatusIds::ABORTED,
+                    getIssues());
+            }
         }
 
         for (const auto& lock : record.GetLocks()) {
-            // TODO: fail early on broken locks
+            AFL_ENSURE(lock.GetCounter() != NKikimr::TSysTables::TLocksTable::TLock::ErrorAlreadyBroken
+                    && lock.GetCounter() != NKikimr::TSysTables::TLocksTable::TLock::ErrorBroken);
             Locks.push_back(lock);
         }
 
@@ -947,7 +1004,7 @@ private:
 
         TReadState read(record.GetReadId(), shardId);
 
-        if (Snapshot.IsValid()) {
+        if (Snapshot.IsValid() && LookupStrategy != NKqpProto::EStreamLookupStrategy::LOOKUP_AND_LOCK) {
             record.MutableSnapshot()->SetStep(Snapshot.Step);
             record.MutableSnapshot()->SetTxId(Snapshot.TxId);
         } else {

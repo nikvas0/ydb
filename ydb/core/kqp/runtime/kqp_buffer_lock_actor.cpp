@@ -347,12 +347,18 @@ public:
                     TStringBuilder() << "Internal error",
                     getIssues());
             }
-            case NKikimrDataEvents::TEvLockRowsResult::STATUS_BAD_REQUEST:
-            case NKikimrDataEvents::TEvLockRowsResult::STATUS_WRONG_SHARD_STATE: {
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_BAD_REQUEST:{
                 return RuntimeError(
                     NYql::NDqProto::StatusIds::BAD_REQUEST,
                     NYql::TIssuesIds::KIKIMR_BAD_REQUEST,
                     "Bad request",
+                    getIssues());
+            }
+            case NKikimrDataEvents::TEvLockRowsResult::STATUS_WRONG_SHARD_STATE: {
+                return RuntimeError(
+                    NYql::NDqProto::StatusIds::UNAVAILABLE,
+                    NYql::TIssuesIds::KIKIMR_TEMPORARILY_UNAVAILABLE,
+                    "Wrong shard state.",
                     getIssues());
             }
             default: {
@@ -365,12 +371,7 @@ public:
         }
 
         for (const auto& lock : record.GetLocks()) {
-            if (!Settings.TxManager->AddLock(shardId, lock, Settings.QuerySpanId)) {
-                RuntimeError(NYql::NDqProto::StatusIds::ABORTED,
-                    NYql::TIssuesIds::KIKIMR_LOCKS_INVALIDATED,
-                    MakeLockInvalidatedMessage(Settings.TxManager, Settings.TablePath));
-                return;
-            }
+            AFL_ENSURE(Settings.TxManager->AddLock(shardId, lock, Settings.QuerySpanId));
             lockState.CollectedLocks.push_back(lock);
         }
 

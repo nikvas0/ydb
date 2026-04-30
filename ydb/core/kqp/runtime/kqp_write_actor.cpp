@@ -1609,7 +1609,6 @@ public:
     };
 
     struct TPathLockInfo {
-        std::vector<ui32> KeyIndexes;
         IKqpBufferTableLock* LockActor = nullptr;
     };
 
@@ -1680,7 +1679,6 @@ public:
             AFL_ENSURE(PathLookupInfo.contains(lock.LockActor->GetTableId().PathId)
                     || PathWriteInfo.contains(lock.LockActor->GetTableId().PathId));
             PathLockInfo[lock.LockActor->GetTableId().PathId] = lock;
-            AFL_ENSURE(lock.KeyIndexes.empty());
         }
 
         ReturningInfo = returning;
@@ -3184,7 +3182,9 @@ public:
                     .LockNodeId = LockNodeId,
                     .LockMode = settings.TransactionSettings.LockMode,
                     .QuerySpanId = QuerySpanId,
-                    .MvccSnapshot = settings.TransactionSettings.MvccSnapshot,
+                    .MvccSnapshot = settings.TransactionSettings.LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE
+                        ? std::nullopt // Locked (pessimistic) rows must be read using last version, not snapshot. 
+                        : settings.TransactionSettings.MvccSnapshot,
 
                     .TxManager = TxManager,
                     .Alloc = Alloc,
@@ -3442,7 +3442,6 @@ public:
                         auto& lockActor = indexLockInfo.Actors.at(indexSettings.TableId.PathId).LockActor;
 
                         locks.emplace_back(TKqpWriteTask::TPathLockInfo{
-                            .KeyIndexes = {},
                             .LockActor = lockActor,
                         });
 
@@ -3502,7 +3501,6 @@ public:
                 auto& lockActor = lockInfo.Actors.at(settings.TableId.PathId).LockActor;
 
                 locks.emplace_back(TKqpWriteTask::TPathLockInfo{
-                    .KeyIndexes = {},
                     .LockActor = lockActor,
                 });
 
