@@ -180,11 +180,6 @@ public:
         return true;
     }
 
-    ui64 NextWriteSeqNum(ui64 writerIndex, ui64 shardId) override {
-        AFL_ENSURE(State == ETransactionState::COLLECTING || State == ETransactionState::ERROR);
-        return ++ShardsInfo.at(shardId).WriteSeqNums[writerIndex];
-    }
-
     void BreakLock(ui64 shardId) override {
         if (LocksIssue) {
             return;
@@ -708,9 +703,6 @@ private:
         // All QuerySpanIds of queries that wrote to this shard in insertion order.
         TVector<ui64> BreakerQuerySpanIds;
         THashSet<ui64> BreakerQuerySpanIdsSet;
-
-        // Last uncommitted write seq num sent to this shard, per writer (absent = none)
-        std::map<ui64, ui64> WriteSeqNums;
     };
 
     static void AddBreakerQuerySpanId(TShardInfo& shardInfo, ui64 querySpanId) {

@@ -1586,6 +1586,7 @@ struct TBatchWithMetadata {
     bool HasRead = false;
     // QuerySpanId of the query that created this batch (for TLI lock-break attribution).
     ui64 QuerySpanId = 0;
+    ui64 WriteSeqNum = 0;
 
     bool IsCoveringBatch() const {
         return Data == nullptr;
@@ -1714,11 +1715,19 @@ public:
             return HasReadInBatch;
         }
 
+        // Next 1-based uncommitted write seq num in this shard's chain, assigned when
+        // batches are formed and carried by the batch itself on resend.
+        ui64 AllocateWriteSeqNum() {
+            return ++WriteSeqNum;
+        }
+
     private:
         std::deque<TBatchWithMetadata> Batches;
         i64& Memory;
         ui64& PendingBatches;
         bool HasReadInBatch = false;
+
+        ui64 WriteSeqNum = 0;
 
         ui64& NextCookie;
         ui64 Cookie;
@@ -2030,6 +2039,12 @@ public:
             return result;
         }
 
+        // The final (prepare/commit) message can still carry data batches: it has no
+        // LockTxId and is not MODE_IMMEDIATE, and the DataShard accepts a non-zero
+        // WriteSeqNum only on uncommitted-write messages, so skip attaching it there.
+        const bool isFinalMessage = shardInfo.IsClosed()
+            && shardInfo.Size() == shardInfo.GetBatchesInFlight();
+
         for (size_t index = 0; index < shardInfo.GetBatchesInFlight(); ++index) {
             const auto& inFlightBatch = shardInfo.GetBatch(index);
             if (inFlightBatch.Data) {
@@ -2047,6 +2062,11 @@ public:
                     writeInfo.Metadata.DefaultColumnsCount);
                 if (inFlightBatch.QuerySpanId != 0) {
                     operation.SetQuerySpanId(inFlightBatch.QuerySpanId);
+                }
+                if (Settings.EnableWriteSeqNum && !isFinalMessage) {
+                    auto* writeSeqNum = operation.MutableWriteSeqNum();
+                    writeSeqNum->SetWriterIndex(Settings.WriterIndex);
+                    writeSeqNum->SetWriteSeqNum(inFlightBatch.WriteSeqNum);
                 }
             } else {
                 AFL_ENSURE(index + 1 == shardInfo.GetBatchesInFlight());
@@ -2153,17 +2173,22 @@ private:
     void FlushSerializer(TWriteToken token) {
         const auto& writeInfo = WriteInfos.at(token);
         for (auto& [shardId, batches] : writeInfo.Serializer->FlushBatchesForce()) {
+            auto& shardInfo = ShardsInfo.GetShard(shardId);
             for (auto& batch : batches) {
                 if (batch && !batch->IsEmpty()) {
                     const bool hasRead = (writeInfo.Metadata.OperationType == NKikimrDataEvents::TEvWrite::TOperation::OPERATION_INSERT
                             || writeInfo.Metadata.OperationType == NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE);
-                    ShardsInfo.GetShard(shardId).PushBatch(TBatchWithMetadata{
+                    TBatchWithMetadata batchWithMetadata {
                         .Token = token,
                         .OperationType = writeInfo.Metadata.OperationType,
                         .Data = std::move(batch),
                         .HasRead = hasRead,
                         .QuerySpanId = writeInfo.QuerySpanId,
-                    });
+                    };
+                    // Every non-empty batch gets a write seq num; whether it is attached
+                    // to the resulting operations is decided at serialization.
+                    batchWithMetadata.WriteSeqNum = shardInfo.AllocateWriteSeqNum();
+                    shardInfo.PushBatch(std::move(batchWithMetadata));
                     ShardUpdates.push_back(IShardedWriteController::TPendingShardInfo{
                         .ShardId = shardId,
                         .HasRead = hasRead,

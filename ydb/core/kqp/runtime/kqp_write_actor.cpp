@@ -484,19 +484,22 @@ public:
         , AttachWriteSeqNum(
               AppData()->FeatureFlags.GetEnableDataShardUncommittedWriteSeqNum()
               && !inconsistentTx
-              && !isOlap
-              && lockTxId != 0)
+              && !isOlap)
         , KeyColumnTypes(std::move(keyColumnTypes))
         , Callbacks(callbacks)
         , TxManager(txManager ? txManager : CreateKqpTransactionManager(/* collectOnly= */ true))
         , Counters(counters)
         , UserCtx(userCtx)
     {
+        // A non-inconsistent write always has a lock id (assigned by the executer).
+        AFL_ENSURE(inconsistentTx || lockTxId != 0);
         LogPrefix = TStringBuilder() << "Table: `" << TablePath << "` (" << TableId << "), " << "SessionActorId: " << sessionActorId;
         ShardedWriteController = CreateShardedWriteController(
             TShardedWriteControllerSettings {
                 .MemoryLimitTotal = MessageSettings.InFlightMemoryLimitPerActorBytes,
                 .Inconsistent = InconsistentTx,
+                .EnableWriteSeqNum = AttachWriteSeqNum,
+                .WriterIndex = WriterIndex,
             },
             Alloc);
 
@@ -1217,9 +1220,6 @@ public:
             return;
         }
 
-        // The batch is applied, so the next one to this shard gets a fresh write seq num
-        InFlightWriteSeqNum.erase(ev->Get()->Record.GetOrigin());
-
         // Only collect locks in WRITE mode (COLLECTING state required by AddLock)
         if (Mode == EMode::WRITE) {
             for (const auto& lock : ev->Get()->Record.GetTxLocks()) {
@@ -1372,28 +1372,6 @@ public:
 
         const auto serializationResult = ShardedWriteController->SerializeMessageToPayload(shardId, *evWrite);
         YQL_ENSURE(isPrepare || isImmediateCommit || serializationResult.TotalDataSize > 0);
-
-        // Set per-operation WriteSeqNum for uncommitted writes
-        if (AttachWriteSeqNum && !isPrepare && !isImmediateCommit && !InconsistentTx) {
-            const size_t opCount = evWrite->Record.OperationsSize();
-            auto [it, allocated] = InFlightWriteSeqNum.try_emplace(shardId);
-            if (allocated) {
-                // First send: allocate a new WriteSeqNum for each operation
-                it->second.reserve(opCount);
-                for (size_t i = 0; i < opCount; ++i) {
-                    it->second.push_back(TxManager->NextWriteSeqNum(WriterIndex, shardId));
-                }
-            }
-            // On resend: reuse the previously allocated seq nums
-            YQL_ENSURE(it->second.size() == opCount,
-                "Operation count mismatch on resend: stored " << it->second.size()
-                << " operations, got " << opCount);
-            for (size_t i = 0; i < opCount; ++i) {
-                auto* writeSeqNum = evWrite->Record.MutableOperations(i)->MutableWriteSeqNum();
-                writeSeqNum->SetWriterIndex(WriterIndex);
-                writeSeqNum->SetWriteSeqNum(it->second[i]);
-            }
-        }
 
         if (metadata->SendAttempts == 0) {
             if (!isPrepare) {
@@ -1736,9 +1714,7 @@ private:
     const bool IsOlap;
     const bool AttachWriteSeqNum;
     // This writer's id in the uncommitted write chain; one write actor per table today.
-    static constexpr ui64 WriterIndex = 0;
-    // Seq nums of the batch in flight at each shard, reused on resend until the shard acks it.
-    THashMap<ui64, TVector<ui64>> InFlightWriteSeqNum;
+    const ui64 WriterIndex = 0;
     const TVector<NScheme::TTypeInfo> KeyColumnTypes;
 
     IKqpTableWriterCallbacks* Callbacks;

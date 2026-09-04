@@ -629,8 +629,9 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
         tester.Execute();
     }
 
-    // A resent uncommitted write is answered twice: with the original result and, once the
-    // shard has seen it, with IsDuplicate set. KQP must take only the first one.
+// A resent uncommitted write is answered twice: with the original result and, once the
+    // shard has seen it, with IsDuplicate set. KQP does not inspect IsDuplicate: the write
+    // actor drops the second reply as already acknowledged (dedup by message cookie).
     class TUncommittedWriteSeqNumAnsweredTwice : public TTableDataModificationTester {
     protected:
         void Setup(TKikimrSettings& settings) override {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <util/generic/ptr.h>
 #include <ydb/core/base/table_index.h>
 #include <ydb/core/tx/data_events/events.h>
@@ -256,6 +258,8 @@ using IShardedWriteControllerPtr = TIntrusivePtr<IShardedWriteController>;
 struct TShardedWriteControllerSettings {
     i64 MemoryLimitTotal = 0;
     bool Inconsistent = false;
+    bool EnableWriteSeqNum = false;
+    ui64 WriterIndex = 0;
 };
 
 IShardedWriteControllerPtr CreateShardedWriteController(
