@@ -701,7 +701,6 @@ public:
 
     void Resolve() {
         ResolvingInProgress = true;
-        AFL_ENSURE(InconsistentTx || IsOlap);
         TableWriteActorSpan = NWilson::TSpan(TWilsonKqp::TableWriteActor, NWilson::TTraceId(ParentTraceId),
             "WaitForTableResolve", NWilson::EFlags::AUTO_END);
 
@@ -800,7 +799,9 @@ public:
             {"logPrefix", this->LogPrefix},
             {"tableId", TableId});
 
-        AFL_ENSURE(InconsistentTx); // Only for CTAS
+        // CTAS (inconsistent) may stream to either row or column tables, and the
+        // consistent row-table move-retry resolves this way too.
+        AFL_ENSURE(InconsistentTx || !IsOlap);
 
         const TVector<TCell> minKey(KeyColumnTypes.size());
         const TTableRange range(minKey, true, {}, false, false);
@@ -852,6 +853,32 @@ public:
             {"logPrefix", this->LogPrefix},
             {"tableId", TableId},
             {"partitionsCount", Partitioning->Size()});
+
+        // Consistent row-table writes retry through re-resolve only when a shard
+        // moved: the tablet id survives a move and the shard set stays the same.
+        // A changed shard set means a split/merge happened, which the MVP cannot
+        // re-route (in-flight batches were packed against the old shards), so it
+        // must surface a terminal error deterministically instead of losing data.
+        if (!InconsistentTx && !IsOlap && !ResolvedWriteShards.empty()) {
+            THashSet<ui64> resolvedShards;
+            resolvedShards.reserve(Partitioning->Size());
+            for (const auto& partition : Partitioning->GetTablePartitioning()) {
+                resolvedShards.insert(partition.ShardId);
+            }
+            if (resolvedShards != ResolvedWriteShards) {
+                YDB_LOG_ERROR("Write shard set changed during the transaction; split/merge re-routing is not implemented.",
+                    {"logPrefix", this->LogPrefix},
+                    {"tablePath", TablePath},
+                    {"previousShards", ResolvedWriteShards.size()},
+                    {"resolvedShards", resolvedShards.size()});
+                RuntimeError(
+                    NYql::NDqProto::StatusIds::UNAVAILABLE,
+                    NYql::TIssuesIds::KIKIMR_TEMPORARILY_UNAVAILABLE,
+                    TStringBuilder() << "Table `" << TablePath
+                        << "` partitioning changed during the transaction (split/merge is not supported yet).");
+                return;
+            }
+        }
 
         Prepare();
     }
@@ -978,6 +1005,12 @@ public:
             if (InconsistentTx) {
                 ResetShardRetries(ev->Get()->Record.GetOrigin(), ev->Cookie);
                 RetryResolve();
+            } else if (AttachWriteSeqNum && Mode == EMode::WRITE) {
+                // The shard is alive but transiently unable to accept the write
+                // (e.g. during a move/reboot). Retry; SendDataToShard bounds the
+                // attempts by MaxWriteAttempts and falls back to re-resolve, which
+                // continues after the move or reports a split/merge.
+                RetryShard(ev->Get()->Record.GetOrigin(), ev->Cookie);
             } else {
                 UpdateStats(ev->Get()->Record.GetTxStats());
                 TxManager->SetError(ev->Get()->Record.GetOrigin());
@@ -1321,7 +1354,9 @@ public:
 
         const auto metadata = ShardedWriteController->GetMessageMetadata(shardId);
         YQL_ENSURE(metadata);
-        YQL_ENSURE(metadata->SendAttempts == 0 || InconsistentTx);
+        // A resend is safe when the shard deduplicates by uncommitted write seq num
+        // (AttachWriteSeqNum) or when the write is inconsistent.
+        YQL_ENSURE(metadata->SendAttempts == 0 || InconsistentTx || AttachWriteSeqNum);
         if (metadata->SendAttempts >= MessageSettings.MaxWriteAttempts) {
             YDB_LOG_WARN("Write retry limit exceeded for table.",
                 {"logPrefix", this->LogPrefix},
@@ -1512,9 +1547,20 @@ public:
             return;
         }
 
+        const auto state = TxManager->GetState(ev->Get()->TabletId);
+
+        // A moved/restarted tablet keeps its id. During WRITE mode the in-flight
+        // batch is resent; retries are bounded by MaxWriteAttempts in SendDataToShard,
+        // and the new tablet generation restores the writer chain and answers once.
+        if (AttachWriteSeqNum
+                && Mode == EMode::WRITE
+                && state == IKqpTransactionManager::PROCESSING) {
+            RetryShard(ev->Get()->TabletId, std::nullopt);
+            return;
+        }
+
         const auto& reattachState = TxManager->GetReattachState(ev->Get()->TabletId);
 
-        const auto state = TxManager->GetState(ev->Get()->TabletId);
         if ((state == IKqpTransactionManager::PREPARED
                     || state == IKqpTransactionManager::EXECUTING)
                 && TxManager->ShouldReattach(ev->Get()->TabletId, TlsActivationContext->Now())) {
@@ -1623,6 +1669,14 @@ public:
             YQL_ENSURE(SchemeEntry);
             ShardedWriteController->OnPartitioningChanged(*SchemeEntry);
         } else {
+            YQL_ENSURE(Partitioning);
+            // Remember the shard set batches are packed against: a re-resolve that
+            // returns a different set means split/merge (see Handle(ResolveKeySetResult)).
+            ResolvedWriteShards.clear();
+            ResolvedWriteShards.reserve(Partitioning->Size());
+            for (const auto& partition : Partitioning->GetTablePartitioning()) {
+                ResolvedWriteShards.insert(partition.ShardId);
+            }
             ShardedWriteController->OnPartitioningChanged(Partitioning);
             Partitioning.reset();
         }
@@ -1723,6 +1777,9 @@ private:
     TPartitioning::TCPtr Partitioning;
     ui64 ResolveAttempts = 0;
     bool ResolvingInProgress = false;
+    // Full table shard set the current batches were packed against (row tables).
+    // Used to detect split/merge on a consistent write re-resolve.
+    THashSet<ui64> ResolvedWriteShards;
 
     IKqpTransactionManagerPtr TxManager;
     bool Closed = false;

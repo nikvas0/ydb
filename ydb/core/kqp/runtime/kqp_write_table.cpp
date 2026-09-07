@@ -2067,6 +2067,9 @@ public:
                     auto* writeSeqNum = operation.MutableWriteSeqNum();
                     writeSeqNum->SetWriterIndex(Settings.WriterIndex);
                     writeSeqNum->SetWriteSeqNum(inFlightBatch.WriteSeqNum);
+                    // The batch is always sent to shardId (retries keep the same target),
+                    // so this is the shard the write sequence was allocated against.
+                    writeSeqNum->SetDataShard(shardId);
                 }
             } else {
                 AFL_ENSURE(index + 1 == shardInfo.GetBatchesInFlight());

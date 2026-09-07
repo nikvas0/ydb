@@ -28,6 +28,8 @@ namespace NDataShard {
 struct TLockWriteSeqNum {
     ui64 WriterIndex = 0;
     ui64 WriteSeqNum = 0;
+    // Shard the write was destined to (pass-through; semantics in a later plan).
+    ui64 DataShard = 0;
 };
 
 // Last uncommitted write for one WriterIndex.

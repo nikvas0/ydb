@@ -10,6 +10,9 @@ option java_package = "ru.yandex.kikimr.proto";
 message TWriteSeqNum {
     optional uint64 WriterIndex = 1;
     optional uint64 WriteSeqNum = 2;
+    // Shard this write was destined to when its WriteSeqNum was allocated.
+    // On a tablet move the id survives, so it doubles as a move-detection hint.
+    optional uint64 DataShard = 3;
 }
 
 message TLock {

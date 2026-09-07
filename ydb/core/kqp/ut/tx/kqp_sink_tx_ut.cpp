@@ -2,6 +2,7 @@
 
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
 #include <ydb/core/testlib/common_helper.h>
+#include <ydb/core/testlib/tablet_helpers.h>
 #include <ydb/core/tx/columnshard/hooks/abstract/abstract.h>
 #include <ydb/core/tx/columnshard/hooks/testing/controller.h>
 #include <ydb/core/tx/datashard/datashard.h>
@@ -701,6 +702,179 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
 
     Y_UNIT_TEST(UncommittedWriteSeqNumAnsweredTwice) {
         TUncommittedWriteSeqNumAnsweredTwice tester;
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    // Every uncommitted write must carry the shard it was destined to in
+    // WriteSeqNum.DataShard, so the receiving shard can later cross-check it.
+    class TUncommittedWriteSeqNumDataShard : public TTableDataModificationTester {
+    protected:
+        YDB_ACCESSOR(bool, Enabled, true);
+
+        void Setup(TKikimrSettings& settings) override {
+            settings.AppConfig.MutableFeatureFlags()->SetEnableDataShardUncommittedWriteSeqNum(Enabled);
+        }
+
+        void DoExecute() override {
+            auto& runtime = *Kikimr->GetTestServer().GetRuntime();
+            auto edgeActor = runtime.AllocateEdgeActor();
+            const auto shards = GetTableShards(&Kikimr->GetTestServer(), edgeActor, "/Root/KV");
+            UNIT_ASSERT_C(!shards.empty(), "expected /Root/KV to have shards");
+            const THashSet<ui64> shardSet(shards.begin(), shards.end());
+
+            bool sawWriteSeqNum = false;
+            bool sawBadDataShard = false;
+            auto checkDataShard = [&](TAutoPtr<IEventHandle>& ev) {
+                if (ev->GetTypeRewrite() == NEvents::TDataEvents::TEvWrite::EventType) {
+                    const auto& record = ev->Get<NEvents::TDataEvents::TEvWrite>()->Record;
+                    for (const auto& op : record.GetOperations()) {
+                        if (op.HasWriteSeqNum()) {
+                            sawWriteSeqNum = true;
+                            const ui64 dataShard = op.GetWriteSeqNum().GetDataShard();
+                            if (dataShard == 0 || !shardSet.contains(dataShard)) {
+                                sawBadDataShard = true;
+                            }
+                        }
+                    }
+                }
+                return TTestActorRuntime::EEventAction::PROCESS;
+            };
+            auto saveObserver = runtime.SetObserverFunc(checkDataShard);
+
+            auto client = Kikimr->GetQueryClient();
+            auto session = Kikimr->RunCall([&] { return client.GetSession().GetValueSync().GetSession(); });
+            auto tx = Kikimr->RunCall([&] {
+                return session.BeginTransaction(TTxSettings::SerializableRW()).ExtractValueSync().GetTransaction(); });
+
+            // Forces a flush of uncommitted writes
+            {
+                auto result = Kikimr->RunCall([&] {
+                    return session.ExecuteQuery(Sprintf(R"(
+                        UPSERT INTO `/Root/KV` (Key, Value) VALUES (10u, "Ten"), (4000000010u, "BigTen");
+                        SELECT Key, Value FROM `/Root/KV` WHERE Key IN (10u, 4000000010u);
+                    )"), TTxControl::Tx(tx)).ExtractValueSync(); });
+                UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            }
+
+            runtime.SetObserverFunc(saveObserver);
+
+            if (Enabled) {
+                UNIT_ASSERT_C(sawWriteSeqNum, "expected EvWrites with a WriteSeqNum");
+            }
+            UNIT_ASSERT_C(!sawBadDataShard, "WriteSeqNum.DataShard must be a real shard of the table");
+        }
+    };
+
+    Y_UNIT_TEST_TWIN(UncommittedWriteSeqNumDataShard, Enabled) {
+        TUncommittedWriteSeqNumDataShard tester;
+        tester.SetEnabled(Enabled);
+        tester.SetIsOlap(false);
+        tester.SetUseRealThreads(false);
+        tester.Execute();
+    }
+
+    // A shard reboot (stand-in for a move) while uncommitted writes are in flight
+    // must not break the transaction: the new generation restores the writer
+    // chain from the locks table and KQP resumes the chain from the restored
+    // seq num. The commit must apply every row exactly once.
+    class TUncommittedWriteSeqNumRebootBetweenFlushes : public TTableDataModificationTester {
+    protected:
+        void Setup(TKikimrSettings& settings) override {
+            settings.AppConfig.MutableFeatureFlags()->SetEnableDataShardUncommittedWriteSeqNum(true);
+        }
+
+        void DoExecute() override {
+            auto& runtime = *Kikimr->GetTestServer().GetRuntime();
+            auto edgeActor = runtime.AllocateEdgeActor();
+            const auto shards = GetTableShards(&Kikimr->GetTestServer(), edgeActor, "/Root/KV");
+            UNIT_ASSERT_C(!shards.empty(), "expected /Root/KV to have shards");
+            // Key 10 is in the first uniform partition; 4000000010 is in a far one.
+            const ui64 rebootedShard = shards[0];
+
+            auto client = Kikimr->GetQueryClient();
+            auto session = Kikimr->RunCall([&] { return client.GetSession().GetValueSync().GetSession(); });
+            auto tx = Kikimr->RunCall([&] {
+                return session.BeginTransaction(TTxSettings::SerializableRW()).ExtractValueSync().GetTransaction(); });
+
+            // Drop the completed write result of the shard we are about to reboot,
+            // so that shard's batch stays in flight when the tablet dies.
+            bool dropped = false;
+            auto observer = [&](TAutoPtr<IEventHandle>& ev) {
+                if (!dropped && ev->GetTypeRewrite() == NEvents::TDataEvents::TEvWriteResult::EventType) {
+                    const auto& record = ev->Get<NEvents::TDataEvents::TEvWriteResult>()->Record;
+                    if (record.GetStatus() == NKikimrDataEvents::TEvWriteResult::STATUS_COMPLETED
+                        && record.GetOrigin() == rebootedShard)
+                    {
+                        dropped = true;
+                        return TTestActorRuntime::EEventAction::DROP;
+                    }
+                }
+                return TTestActorRuntime::EEventAction::PROCESS;
+            };
+            auto saveObserver = runtime.SetObserverFunc(observer);
+
+            // Flush uncommitted writes to /Root/KV; the rebooted shard's result is dropped.
+            auto future = Kikimr->RunInThreadPool([&] {
+                return session.ExecuteQuery(Sprintf(R"(
+                    UPSERT INTO `/Root/KV` (Key, Value) VALUES (10u, "Ten"), (4000000010u, "BigTen");
+                    SELECT Key, Value FROM `/Root/KV` WHERE Key IN (10u, 4000000010u) ORDER BY Key;
+                )"), TTxControl::Tx(tx)).ExtractValueSync(); });
+            {
+                TDispatchOptions opts;
+                opts.FinalEvents.emplace_back([&](IEventHandle&) { return dropped; });
+                runtime.DispatchEvents(opts);
+            }
+            UNIT_ASSERT(dropped);
+
+            // Restart the shard while its write is still unacknowledged.
+            RebootTablet(runtime, rebootedShard, edgeActor);
+
+            // KQP gets a delivery problem, retries the batch; the new generation
+            // restores the seq num chain and answers exactly once.
+            auto result = runtime.WaitFuture(future);
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            CompareYson(R"([[10u;["Ten"]];[4000000010u;["BigTen"]]])",
+                FormatResultSetYson(result.GetResultSet(0)));
+
+            runtime.SetObserverFunc(saveObserver);
+
+            // Another flush chains a new write onto the restored seq num.
+            {
+                auto next = Kikimr->RunCall([&] {
+                    return session.ExecuteQuery(Sprintf(R"(
+                        UPSERT INTO `/Root/KV` (Key, Value) VALUES (11u, "Eleven");
+                    )"), TTxControl::Tx(tx)).ExtractValueSync(); });
+                UNIT_ASSERT_VALUES_EQUAL_C(next.GetStatus(), EStatus::SUCCESS, next.GetIssues().ToString());
+            }
+            {
+                auto next = Kikimr->RunCall([&] {
+                    return session.ExecuteQuery(Sprintf(R"(
+                        SELECT Key, Value FROM `/Root/KV` WHERE Key IN (10u, 11u, 4000000010u) ORDER BY Key;
+                    )"), TTxControl::Tx(tx)).ExtractValueSync(); });
+                UNIT_ASSERT_VALUES_EQUAL_C(next.GetStatus(), EStatus::SUCCESS, next.GetIssues().ToString());
+                CompareYson(R"([[10u;["Ten"]];[11u;["Eleven"]];[4000000010u;["BigTen"]]])",
+                    FormatResultSetYson(next.GetResultSet(0)));
+            }
+
+            auto commitResult = Kikimr->RunCall([&] { return tx.Commit().ExtractValueSync(); });
+            UNIT_ASSERT_VALUES_EQUAL_C(commitResult.GetStatus(), EStatus::SUCCESS, commitResult.GetIssues().ToString());
+
+            {
+                auto check = Kikimr->RunCall([&] {
+                    return session.ExecuteQuery(Sprintf(R"(
+                        SELECT Key, Value FROM `/Root/KV` WHERE Key IN (10u, 11u, 4000000010u) ORDER BY Key;
+                    )"), TTxControl::BeginTx(TTxSettings::SnapshotRO()).CommitTx()).ExtractValueSync(); });
+                UNIT_ASSERT_VALUES_EQUAL_C(check.GetStatus(), EStatus::SUCCESS, check.GetIssues().ToString());
+                CompareYson(R"([[10u;["Ten"]];[11u;["Eleven"]];[4000000010u;["BigTen"]]])",
+                    FormatResultSetYson(check.GetResultSet(0)));
+            }
+        }
+    };
+
+    Y_UNIT_TEST(UncommittedWriteSeqNumRebootBetweenFlushes) {
+        TUncommittedWriteSeqNumRebootBetweenFlushes tester;
         tester.SetIsOlap(false);
         tester.SetUseRealThreads(false);
         tester.Execute();

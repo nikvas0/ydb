@@ -233,6 +233,8 @@ std::tuple<NKikimrTxDataShard::TError::EKind, TString> TValidatedWriteTxOperatio
     if (recordOperation.HasWriteSeqNum()) {
         WriteSeqNum.WriterIndex = recordOperation.GetWriteSeqNum().GetWriterIndex();
         WriteSeqNum.WriteSeqNum = recordOperation.GetWriteSeqNum().GetWriteSeqNum();
+        // Pass-through: the shard does not interpret DataShard yet (next plan).
+        WriteSeqNum.DataShard = recordOperation.GetWriteSeqNum().GetDataShard();
     }
 
     SetTxKeys(tableInfo, tabletId, keyValidator);
