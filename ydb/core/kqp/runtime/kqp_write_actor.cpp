@@ -430,6 +430,62 @@ struct TKqpTableWriterStatistics {
     }
 };
 
+// Index of the partition of `shardId` inside `partitioning`, or
+// `partitioning.Size()` when the shard is not in the partitioning.
+size_t FindPartitionIndex(const TPartitioning& partitioning, ui64 shardId) {
+    const auto& partitions = partitioning.GetTablePartitioning();
+    for (size_t index = 0; index < partitions.size(); ++index) {
+        if (partitions[index].ShardId == shardId) {
+            return index;
+        }
+    }
+    return partitions.size();
+}
+
+// Full key range of the index-th partition of `partitioning`.
+// The first partition starts at the min key (`keyColumnsCount` null cells); every
+// partition ends at the next partition's EndKeyPrefix (inclusive) and starts right
+// after the previous partition's EndKeyPrefix (exclusive if that boundary was
+// inclusive); the last partition has no upper bound.
+// Returns a default (undefined) range for out-of-bounds index, a partition without
+// range info (Range == Nothing) or a column-table partitioning where every
+// partition has an empty EndKeyPrefix.
+TOwnedTableRange GetShardKeyRange(const TPartitioning& partitioning, size_t index, size_t keyColumnsCount) {
+    const auto& partitions = partitioning.GetTablePartitioning();
+    if (index >= partitions.size() || !partitions[index].Range) {
+        return TOwnedTableRange();
+    }
+
+    const auto& range = *partitions[index].Range;
+    const auto& endKey = range.EndKeyPrefix.GetCells();
+    // An empty EndKeyPrefix means "+inf": legitimate for the last partition, but
+    // for a non-last one (column-table style partitioning without borders) the
+    // range is not representable.
+    if (endKey.empty() && index + 1 != partitions.size()) {
+        return TOwnedTableRange();
+    }
+
+    // The first partition starts at the min key: keyColumnsCount null cells.
+    TVector<TCell> from(keyColumnsCount);
+    bool inclusiveFrom = true;
+    if (index > 0) {
+        if (!partitions[index - 1].Range) {
+            return TOwnedTableRange();
+        }
+        const auto& prev = *partitions[index - 1].Range;
+        const auto& prevEnd = prev.EndKeyPrefix.GetCells();
+        if (prevEnd.empty()) {
+            return TOwnedTableRange();
+        }
+        from.assign(prevEnd.begin(), prevEnd.end());
+        // A previous boundary that includes its EndKeyPrefix must not be re-included here.
+        inclusiveFrom = !prev.IsInclusive;
+    }
+
+    // The last partition has no upper bound (empty To, InclusiveTo == false).
+    return TOwnedTableRange(from, inclusiveFrom, endKey, range.IsInclusive || range.IsPoint);
+}
+
 // Compute the shards of `newPartitioning` that now cover the key range of `deadShardId`
 // in `oldPartitioning`. Used on split/merge: the removed shard's pending batches are
 // re-routed to these shards, and its TxManager participant state (locks, flags) is
@@ -444,40 +500,12 @@ TVector<ui64> FindCoveringShards(
     AFL_ENSURE(oldPartitioning);
     AFL_ENSURE(newPartitioning);
 
-    const auto& oldPartitions = oldPartitioning->GetTablePartitioning();
-    size_t deletedIndex = oldPartitions.size();
-    for (size_t index = 0; index < oldPartitions.size(); ++index) {
-        if (oldPartitions[index].ShardId == deletedShardId) {
-            deletedIndex = index;
-            break;
-        }
-    }
     // The removed shard must exist in the old partitioning; a miss means a cache
     // desync and re-homing would silently break the commit — fail closed instead.
-    AFL_ENSURE(deletedIndex < oldPartitions.size());
-    AFL_ENSURE(oldPartitions[deletedIndex].Range.Defined());
-
-    const auto makeBoundaryCells = [](const TKeyDesc::TPartitionRangeInfo& range) {
-        return range.EndKeyPrefix.GetCells();
-    };
-
-    // The dead shard's range start: end of the previous partition (exclusive if that
-    // boundary was inclusive, inclusive otherwise); the first partition starts at
-    // the min key (null cells, same convention as ResolveShards' full range).
-    TVector<TCell> from(keyColumnTypes.size());
-    bool inclusiveFrom = true;
-    if (deletedIndex > 0) {
-        AFL_ENSURE(oldPartitions[deletedIndex - 1].Range.Defined());
-        const auto& prevRange = *oldPartitions[deletedIndex - 1].Range;
-        const auto cells = makeBoundaryCells(prevRange);
-        from.assign(cells.begin(), cells.end());
-        inclusiveFrom = !prevRange.IsInclusive;
-    }
-
-    const auto& deadRange = *oldPartitions[deletedIndex].Range;
-    const auto to = makeBoundaryCells(deadRange);
-    const bool inclusiveTo = deadRange.IsInclusive || deadRange.IsPoint;
-    const TTableRange deadTableRange(from, inclusiveFrom, to, inclusiveTo);
+    const auto deletedIndex = FindPartitionIndex(*oldPartitioning, deletedShardId);
+    AFL_ENSURE(deletedIndex < oldPartitioning->Size());
+    const auto deadTableRange = GetShardKeyRange(*oldPartitioning, deletedIndex, keyColumnTypes.size());
+    AFL_ENSURE(deadTableRange.From.size() > 0 || deadTableRange.To.size() > 0);
 
     auto intersections = newPartitioning->GetIntersectionWithRange(
         keyColumnTypes, deadTableRange);
@@ -1434,9 +1462,29 @@ public:
             // This ensures TxManager tracks the correct per-query SpanId even when
             // FlushBuffers() flushes batches from multiple queries at once.
             const ui64 spanId = shardInfo.QuerySpanId != 0 ? shardInfo.QuerySpanId : CurrentQuerySpanId;
-            TxManager->AddShard(shardInfo.ShardId, IsOlap, TablePath);
+            TxManager->AddShard(shardInfo.ShardId, IsOlap, TablePath, MakeShardMeta(shardInfo.ShardId));
             TxManager->AddAction(shardInfo.ShardId, flags, spanId);
         }
+    }
+
+    // Borders/version of the shard in the partitioning this actor currently works
+    // with. Empty for column tables (no range info per partition).
+    TShardMeta MakeShardMeta(const ui64 shardId) const {
+        TShardMeta meta;
+        meta.TableId = TableId;
+        if (IsOlap) {
+            return meta;
+        }
+        const auto partitioning = ShardedWriteController->GetPartitioning();
+        if (!partitioning) {
+            return meta;
+        }
+        meta.PartitioningVersion = partitioning->GetVersion();
+        const auto index = FindPartitionIndex(*partitioning, shardId);
+        if (index < partitioning->Size()) {
+            meta.Borders = GetShardKeyRange(*partitioning, index, KeyColumnTypes.size());
+        }
+        return meta;
     }
 
     void FlushBuffer(const TWriteToken token) {

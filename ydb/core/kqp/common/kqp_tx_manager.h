@@ -4,6 +4,7 @@
 #include <ydb/core/kqp/common/simple/reattach.h>
 #include <ydb/core/kqp/gateway/kqp_gateway.h>
 #include <ydb/core/kqp/provider/yql_kikimr_provider.h>
+#include <ydb/core/scheme/scheme_tabledefs.h>
 #include <ydb/core/util/ulid.h>
 #include <ydb/library/mkql_proto/protos/minikql.pb.h>
 #include <ydb/core/protos/data_events.pb.h>
@@ -16,6 +17,27 @@ struct TTableInfo {
     bool IsOlap = false;
     THashSet<TStringBuf> Pathes;
 };
+
+// Known metadata of a tx participant datashard: which table it belongs to and
+// which key range the shard covered at the moment it was first registered in
+// the transaction. Borders always come from a scheme-cache-resolved partitioning
+// whose version is recorded alongside.
+// Borders default-constructed (undefined From/To) means "unknown" — e.g. for
+// shards that never were a part of any resolved partitioning in this process.
+struct TShardMeta {
+    TTableId TableId;
+    TOwnedTableRange Borders;
+    ui64 PartitioningVersion = 0;
+
+    bool IsKnown() const {
+        return PartitioningVersion != 0;
+    }
+};
+
+// True when both ranges carry the same key borders: same From/To cells (compared
+// byte-wise; borders always come from the same SchemeShard serialization), plus
+// matching inclusivity and point flags.
+bool SameBorders(const TTableRange& lhs, const TTableRange& rhs);
 
 class IKqpTransactionManager {
 public:
@@ -37,7 +59,7 @@ public:
 
     using TActionFlags = ui8;
 
-    virtual void AddShard(ui64 shardId, bool isOlap, const TString& path) = 0;
+    virtual void AddShard(ui64 shardId, bool isOlap, const TString& path, const TShardMeta& meta = {}) = 0;
     virtual void AddAction(ui64 shardId, ui8 action) = 0;
     virtual void AddAction(ui64 shardId, ui8 action, ui64 querySpanId) = 0;
     virtual void AddTopic(ui64 topicId, const TString& path) = 0;
@@ -61,6 +83,10 @@ public:
     virtual TVector<NKikimrDataEvents::TLock> GetLocks(ui64 shardId) const = 0;
 
     virtual TTableInfo GetShardTableInfo(ui64 shardId) const = 0;
+
+    // Known metadata of a transaction participant shard. Returns an unknown-meta
+    // (IsKnown() == false) object for unregistered shards.
+    virtual const TShardMeta& GetShardMeta(ui64 shardId) const = 0;
 
     virtual bool ShouldReattach(ui64 shardId, TInstant now) = 0;
     virtual void Reattached(ui64 shardId) = 0;

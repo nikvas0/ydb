@@ -8,6 +8,40 @@
 namespace NKikimr {
 namespace NKqp {
 
+bool SameBorders(const TTableRange& lhs, const TTableRange& rhs) {
+    if (lhs.Point != rhs.Point
+            || lhs.InclusiveFrom != rhs.InclusiveFrom
+            || lhs.InclusiveTo != rhs.InclusiveTo) {
+        return false;
+    }
+
+    if (lhs.From.size() != rhs.From.size() || lhs.To.size() != rhs.To.size()) {
+        return false;
+    }
+
+    for (size_t i = 0; i < lhs.From.size(); ++i) {
+        const TCell& a = lhs.From[i];
+        const TCell& b = rhs.From[i];
+        if (a.IsNull() != b.IsNull()
+                || a.Size() != b.Size()
+                || (a.Size() != 0 && memcmp(a.Data(), b.Data(), a.Size()) != 0)) {
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < lhs.To.size(); ++i) {
+        const TCell& a = lhs.To[i];
+        const TCell& b = rhs.To[i];
+        if (a.IsNull() != b.IsNull()
+                || a.Size() != b.Size()
+                || (a.Size() != 0 && memcmp(a.Data(), b.Data(), a.Size()) != 0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 namespace {
 
 struct TKqpLock {
@@ -59,7 +93,7 @@ public:
     TKqpTransactionManager(bool collectOnly)
         : CollectOnly(collectOnly) {}
 
-    void AddShard(ui64 shardId, bool isOlap, const TString& path) override {
+    void AddShard(ui64 shardId, bool isOlap, const TString& path, const TShardMeta& meta) override {
         AFL_ENSURE(State == ETransactionState::COLLECTING || State == ETransactionState::ERROR);
         ShardsIds.insert(shardId);
         auto& shardInfo = ShardsInfo[shardId];
@@ -69,6 +103,39 @@ public:
         const auto [stringsIter, _] = TablePathes.insert(path);
         const TStringBuf pathBuf = *stringsIter;
         shardInfo.Pathes.insert(pathBuf);
+
+        // Keep the freshest known metadata: a shard discovered through several
+        // paths (write batch, lock echo) may arrive with the same borders from
+        // different partitioning snapshots; only the version moves forward.
+        if (meta.IsKnown()) {
+            auto& stored = shardInfo.Meta;
+            if (stored.IsKnown()) {
+                AFL_ENSURE(stored.TableId == meta.TableId)
+                    ("stored", stored.TableId)("incoming", meta.TableId);
+                // Metadata may arrive as borders-with-version or version-only (the
+                // caller had no resolved partitioning at hand). Compare borders only
+                // when both sides carry them; a version-only update just bumps the
+                // version and keeps the stored borders.
+                const bool bordersKnown = stored.Borders.From.size() > 0 || stored.Borders.To.size() > 0;
+                const bool incomingBorders = meta.Borders.From.size() > 0 || meta.Borders.To.size() > 0;
+                if (bordersKnown && incomingBorders) {
+                    AFL_ENSURE(SameBorders(stored.Borders, meta.Borders))
+                        ("shardId", shardId)
+                        ("storedFrom", stored.Borders.From.size())
+                        ("storedTo", stored.Borders.To.size())
+                        ("storedVersion", stored.PartitioningVersion)
+                        ("incomingFrom", meta.Borders.From.size())
+                        ("incomingTo", meta.Borders.To.size())
+                        ("incomingVersion", meta.PartitioningVersion);
+                }
+                stored.PartitioningVersion = Max(stored.PartitioningVersion, meta.PartitioningVersion);
+                if (incomingBorders && !bordersKnown) {
+                    stored.Borders = meta.Borders;
+                }
+            } else {
+                stored = meta;
+            }
+        }
     }
 
     void AddAction(ui64 shardId, ui8 action) override {
@@ -196,6 +263,9 @@ public:
     bool MoveShardTo(ui64 fromShardId, const TVector<ui64>& toShardIds) override {
         AFL_ENSURE(State == ETransactionState::COLLECTING);
         AFL_ENSURE(!toShardIds.empty());
+
+        // TODO: verify partitioning meta
+
         // The removed shard's tablet id is gone: GetDeletedShards only returns shards
         // absent from the new partitioning, so the targets cannot contain it. A target
         // equal to the removed shard would corrupt the participant state on the erase
@@ -215,6 +285,10 @@ public:
             // MoveShard to may be called for toShardIds several times in case of merge.
             auto [toIt, inserted] = ShardsInfo.try_emplace(toShardId);
             auto& to = toIt->second;
+            // Metadata is not inherited from the removed shard: after a split/merge
+            // the target covers a different key range, and the targets that receive
+            // the transferred writes learn their exact borders from their own
+            // UpdateShards pass (AddShard with the new partitioning).
             to.IsOlap = from.IsOlap;
             // A merge may transfer several removed shards onto the same target:
             // merge the flags instead of overwriting, or an earlier shard's
@@ -268,6 +342,10 @@ public:
             .IsOlap = info.IsOlap,
             .Pathes = info.Pathes,
         };
+    }
+
+    const TShardMeta& GetShardMeta(ui64 shardId) const override {
+        return ShardsInfo.at(shardId).Meta;
     }
 
     EShardState GetState(ui64 shardId) const override {
@@ -761,6 +839,8 @@ private:
     struct TShardInfo {
         EShardState State = EShardState::PROCESSING;
         TActionFlags Flags = 0;
+
+        TShardMeta Meta;
 
         struct TLockInfo {
             TKqpLock Lock;

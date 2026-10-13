@@ -275,8 +275,6 @@ public:
             {"requestId", record.GetRequestId()},
             {"shardId", shardId});
 
-        Settings.TxManager->AddShard(shardId, false, Settings.TablePath);
-
         auto& shardState = ShardToState[shardId];
         const bool needToCreatePipe = !shardState.HasPipe;
 
@@ -318,13 +316,14 @@ public:
             return;
         }
 
-        Settings.TxManager->AddParticipantNode(ev->Sender.NodeId());
-
         auto& requestState = requestIt->second;
         const auto shardId = requestState.ShardId;
         const auto cookie = requestState.LockCookie;
 
-        Y_UNUSED(shardId);
+        // TODO: Collect partitioning metadata for locks
+        Settings.TxManager->AddShard(shardId, false, Settings.TablePath);
+        // TODO: Add Action Lock?
+        Settings.TxManager->AddParticipantNode(ev->Sender.NodeId());
 
         auto& lockState = CookieToLockState.at(cookie);
         AFL_ENSURE(lockState.Worker);

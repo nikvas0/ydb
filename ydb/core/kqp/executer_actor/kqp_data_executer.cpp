@@ -1428,6 +1428,8 @@ private:
                     const auto& stageInfo = TasksGraph.GetStageInfo(task.StageId);
                     ShardIdToTableInfo->Add(lock.GetDataShard(), stageInfo.Meta.TableKind == ETableKind::Olap, stageInfo.Meta.TablePath);
 
+                    // At current time don't add shard partitioning metadata for reads. (Read Committed doesn't collect locks for reads.)
+                    // TODO: Collect partitioning metadata for locks
                     TxManager->AddShard(lock.GetDataShard(), stageInfo.Meta.TableKind == ETableKind::Olap, stageInfo.Meta.TablePath);
                     TxManager->AddAction(lock.GetDataShard(), IKqpTransactionManager::EAction::READ);
                     TxManager->AddLock(lock.GetDataShard(), lock, Request.QuerySpanId, deferredVictimSpanId);
@@ -1467,6 +1469,7 @@ private:
                         flags |= IKqpTransactionManager::EAction::READ;
                     }
 
+                    // At current time don't add shard partitioning metadata here. (Read Committed doesn't work for OLAP.)
                     TxManager->AddShard(lock.GetDataShard(), stageInfo.Meta.TableKind == ETableKind::Olap, stageInfo.Meta.TablePath);
                     TxManager->AddAction(lock.GetDataShard(), flags, Request.QuerySpanId);
                     TxManager->AddLock(lock.GetDataShard(), lock, Request.QuerySpanId);
