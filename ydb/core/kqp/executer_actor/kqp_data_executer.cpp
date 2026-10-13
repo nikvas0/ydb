@@ -12,6 +12,7 @@
 #include <ydb/core/kqp/common/kqp.h>
 #include <ydb/core/kqp/common/kqp_data_integrity_trails.h>
 #include <ydb/core/kqp/common/kqp_tx.h>
+#include <ydb/core/kqp/common/kqp_shard_meta.h>
 #include <ydb/core/kqp/common/kqp_tx_manager.h>
 #include <ydb/core/kqp/common/kqp_yql.h>
 #include <ydb/core/kqp/common/simple/reattach.h>
@@ -1423,14 +1424,23 @@ private:
                 NDataIntegrity::LogIntegrityTrails("InputActorResult", Request.UserTraceId, TxId, info, TlsActivationContext->AsActorContext());
                 ui64 deferredVictimSpanId = info.HasDeferredVictimQuerySpanId()
                     ? info.GetDeferredVictimQuerySpanId() : 0;
+                const auto& task = TasksGraph.GetTask(taskId);
+                const auto& stageInfo = TasksGraph.GetStageInfo(task.StageId);
+                THashMap<ui64, TShardMeta> shardMetas;
+                for (const auto& shardInfo : info.GetShardPartitioningInfo()) {
+                    shardMetas.emplace(shardInfo.GetShardId(), ToShardMeta(shardInfo, stageInfo.Meta.TableId));
+                }
                 for (const auto& lock : info.GetLocks()) {
-                    const auto& task = TasksGraph.GetTask(taskId);
-                    const auto& stageInfo = TasksGraph.GetStageInfo(task.StageId);
                     ShardIdToTableInfo->Add(lock.GetDataShard(), stageInfo.Meta.TableKind == ETableKind::Olap, stageInfo.Meta.TablePath);
 
-                    // At current time don't add shard partitioning metadata for reads. (Read Committed doesn't collect locks for reads.)
-                    // TODO: Collect partitioning metadata for locks
-                    TxManager->AddShard(lock.GetDataShard(), stageInfo.Meta.TableKind == ETableKind::Olap, stageInfo.Meta.TablePath);
+                    // Partitioning metadata is shipped by the input actor for the
+                    // shards it sent EvLocks to; other shards (e.g. locked by plain
+                    // reads) are registered without it.
+                    if (const auto* meta = shardMetas.FindPtr(lock.GetDataShard())) {
+                        TxManager->AddShard(lock.GetDataShard(), stageInfo.Meta.TableKind == ETableKind::Olap, stageInfo.Meta.TablePath, *meta);
+                    } else {
+                        TxManager->AddShard(lock.GetDataShard(), stageInfo.Meta.TableKind == ETableKind::Olap, stageInfo.Meta.TablePath);
+                    }
                     TxManager->AddAction(lock.GetDataShard(), IKqpTransactionManager::EAction::READ);
                     TxManager->AddLock(lock.GetDataShard(), lock, Request.QuerySpanId, deferredVictimSpanId);
                 }

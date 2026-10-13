@@ -10,6 +10,7 @@ PEERDIR(
 )
 
 SRCS(
+    kqp_shard_meta_ut.cpp
     kqp_tx_manager_ut.cpp
 )
 

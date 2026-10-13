@@ -357,8 +357,10 @@ public:
     }
 
     void SetError(ui64 shardId) override {
-        auto& shardInfo = ShardsInfo.at(shardId);
-        shardInfo.State = EShardState::ERROR;
+        auto shardIter = ShardsInfo.find(shardId);
+        if (shardIter != std::end(ShardsInfo)) {
+            shardIter->second.State = EShardState::ERROR;
+        }
     }
 
     void SetError() override {

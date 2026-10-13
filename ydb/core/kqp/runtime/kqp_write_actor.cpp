@@ -14,6 +14,7 @@
 #include <ydb/core/kqp/common/buffer/buffer.h>
 #include <ydb/core/kqp/common/kqp_data_integrity_trails.h>
 #include <ydb/core/kqp/common/kqp_locks_tli_helpers.h>
+#include <ydb/core/kqp/common/kqp_shard_meta.h>
 #include <ydb/core/kqp/common/kqp_tx_manager.h>
 #include <ydb/core/kqp/common/kqp_yql.h>
 #include <ydb/core/kqp/common/simple/kqp_event_ids.h>
@@ -429,62 +430,6 @@ struct TKqpTableWriterStatistics {
         AffectedPartitions.clear();
     }
 };
-
-// Index of the partition of `shardId` inside `partitioning`, or
-// `partitioning.Size()` when the shard is not in the partitioning.
-size_t FindPartitionIndex(const TPartitioning& partitioning, ui64 shardId) {
-    const auto& partitions = partitioning.GetTablePartitioning();
-    for (size_t index = 0; index < partitions.size(); ++index) {
-        if (partitions[index].ShardId == shardId) {
-            return index;
-        }
-    }
-    return partitions.size();
-}
-
-// Full key range of the index-th partition of `partitioning`.
-// The first partition starts at the min key (`keyColumnsCount` null cells); every
-// partition ends at the next partition's EndKeyPrefix (inclusive) and starts right
-// after the previous partition's EndKeyPrefix (exclusive if that boundary was
-// inclusive); the last partition has no upper bound.
-// Returns a default (undefined) range for out-of-bounds index, a partition without
-// range info (Range == Nothing) or a column-table partitioning where every
-// partition has an empty EndKeyPrefix.
-TOwnedTableRange GetShardKeyRange(const TPartitioning& partitioning, size_t index, size_t keyColumnsCount) {
-    const auto& partitions = partitioning.GetTablePartitioning();
-    if (index >= partitions.size() || !partitions[index].Range) {
-        return TOwnedTableRange();
-    }
-
-    const auto& range = *partitions[index].Range;
-    const auto& endKey = range.EndKeyPrefix.GetCells();
-    // An empty EndKeyPrefix means "+inf": legitimate for the last partition, but
-    // for a non-last one (column-table style partitioning without borders) the
-    // range is not representable.
-    if (endKey.empty() && index + 1 != partitions.size()) {
-        return TOwnedTableRange();
-    }
-
-    // The first partition starts at the min key: keyColumnsCount null cells.
-    TVector<TCell> from(keyColumnsCount);
-    bool inclusiveFrom = true;
-    if (index > 0) {
-        if (!partitions[index - 1].Range) {
-            return TOwnedTableRange();
-        }
-        const auto& prev = *partitions[index - 1].Range;
-        const auto& prevEnd = prev.EndKeyPrefix.GetCells();
-        if (prevEnd.empty()) {
-            return TOwnedTableRange();
-        }
-        from.assign(prevEnd.begin(), prevEnd.end());
-        // A previous boundary that includes its EndKeyPrefix must not be re-included here.
-        inclusiveFrom = !prev.IsInclusive;
-    }
-
-    // The last partition has no upper bound (empty To, InclusiveTo == false).
-    return TOwnedTableRange(from, inclusiveFrom, endKey, range.IsInclusive || range.IsPoint);
-}
 
 // Compute the shards of `newPartitioning` that now cover the key range of `deadShardId`
 // in `oldPartitioning`. Used on split/merge: the removed shard's pending batches are
@@ -1470,21 +1415,12 @@ public:
     // Borders/version of the shard in the partitioning this actor currently works
     // with. Empty for column tables (no range info per partition).
     TShardMeta MakeShardMeta(const ui64 shardId) const {
-        TShardMeta meta;
-        meta.TableId = TableId;
         if (IsOlap) {
+            TShardMeta meta;
+            meta.TableId = TableId;
             return meta;
         }
-        const auto partitioning = ShardedWriteController->GetPartitioning();
-        if (!partitioning) {
-            return meta;
-        }
-        meta.PartitioningVersion = partitioning->GetVersion();
-        const auto index = FindPartitionIndex(*partitioning, shardId);
-        if (index < partitioning->Size()) {
-            meta.Borders = GetShardKeyRange(*partitioning, index, KeyColumnTypes.size());
-        }
-        return meta;
+        return NKqp::MakeShardMeta(TableId, ShardedWriteController->GetPartitioning(), shardId, KeyColumnTypes.size());
     }
 
     void FlushBuffer(const TWriteToken token) {

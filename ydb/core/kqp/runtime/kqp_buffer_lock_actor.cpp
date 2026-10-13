@@ -320,9 +320,9 @@ public:
         const auto shardId = requestState.ShardId;
         const auto cookie = requestState.LockCookie;
 
-        // TODO: Collect partitioning metadata for locks
-        Settings.TxManager->AddShard(shardId, false, Settings.TablePath);
         // TODO: Add Action Lock?
+        Settings.TxManager->AddShard(shardId, false, Settings.TablePath,
+            MakeShardMeta(Settings.TableId, Partitioning, shardId, KeyColumnTypes.size()));
         Settings.TxManager->AddParticipantNode(ev->Sender.NodeId());
 
         auto& lockState = CookieToLockState.at(cookie);
