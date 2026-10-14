@@ -260,7 +260,7 @@ public:
 
     // A shard removed by a split/merge had its participant state moved to every shard
     // covering its range
-    bool MoveShardTo(ui64 fromShardId, const TVector<ui64>& toShardIds, const TVector<NScheme::TTypeInfo>& keyColumnTypes) override {
+    bool MoveShardTo(ui64 fromShardId, const TVector<ui64>& toShardIds) override {
         AFL_ENSURE(State == ETransactionState::COLLECTING);
         AFL_ENSURE(!toShardIds.empty());
 
@@ -277,6 +277,10 @@ public:
         AFL_ENSURE(from.State == EShardState::PROCESSING);
         AFL_ENSURE(!from.IsOlap);
 
+        // The moved table's key schema, used below to compare shard key borders.
+        // The table metadata is stored by the executer for every resolved table.
+        const auto& keyColumnTypes = TableMetas.at(from.Meta.TableId).KeyColumnTypes;
+
         bool locksConsistent = true;
         for (const ui64 toShardId : toShardIds) {
             AFL_ENSURE(toShardId != fromShardId);
@@ -286,7 +290,8 @@ public:
             // Verify the partitioning meta when both sides carry it (unknown or
             // borders-less metadata — e.g. a fresh EnsureShards-only target — is
             // safely skipped): the target must be a shard of a strictly newer
-            // partitioning whose range intersects the removed shard's range.
+            // partitioning whose range intersects the removed shard's range. The
+            // border comparison uses the moved table's key schema (SetTableMeta).
             const bool fromMetaUsable = from.Meta.IsKnown() && !from.Meta.Borders.From.empty();
             const bool toMetaUsable = to.Meta.IsKnown() && !to.Meta.Borders.From.empty();
             if (fromMetaUsable && toMetaUsable) {
@@ -387,16 +392,16 @@ public:
         State = ETransactionState::ERROR;
     }
 
-    void SetPartitioning(const TTableId tableId, const TPartitioning::TCPtr& partitioning) override {
-        TablePartitioning[tableId] = partitioning;
+    void SetTableMeta(const TTableId tableId, TTableMeta tableMeta) override {
+        TableMetas[tableId] = std::move(tableMeta);
     }
 
-    TPartitioning::TCPtr GetPartitioning(const TTableId tableId) const override {
-        auto iterator = TablePartitioning.find(tableId);
-        if (iterator != std::end(TablePartitioning)) {
+    TTableMeta GetTableMeta(const TTableId tableId) const override {
+        auto iterator = TableMetas.find(tableId);
+        if (iterator != std::end(TableMetas)) {
             return iterator->second;
         }
-        return nullptr;
+        return {};
     }
 
     void AddParticipantNode(const ui32 nodeId) override {
@@ -944,7 +949,7 @@ private:
 
     THashSet<ui32> ParticipantNodes;
 
-    THashMap<TTableId, TPartitioning::TCPtr> TablePartitioning;
+    THashMap<TTableId, TTableMeta> TableMetas;
 
     bool AllowVolatile = false;
     bool ReadOnly = true;

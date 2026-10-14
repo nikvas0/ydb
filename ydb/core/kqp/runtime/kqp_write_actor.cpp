@@ -577,7 +577,7 @@ public:
     void Bootstrap() {
         LogPrefix = TStringBuilder() << "SelfId: " << this->SelfId() << ", " << LogPrefix;
         try {
-            const auto partitioning = TxManager->GetPartitioning(TableId);
+            const auto partitioning = TxManager->GetTableMeta(TableId).InitialPartitioning;
             if (!partitioning) {
                 Resolve();
             } else {
@@ -1929,7 +1929,7 @@ public:
                     // be an unreachable commit participant and the prepare would wait
                     // for it forever).
                     ShardedWriteController->EnsureShards(targets);
-                    locksConsistent &= TxManager->MoveShardTo(shardId, targets, KeyColumnTypes);
+                    locksConsistent &= TxManager->MoveShardTo(shardId, targets);
                 }
                 if (!locksConsistent) {
                     // A transferred ancestor lock merged inconsistently with a lock

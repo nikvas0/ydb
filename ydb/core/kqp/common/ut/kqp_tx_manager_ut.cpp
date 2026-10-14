@@ -123,6 +123,24 @@ Y_UNIT_TEST_SUITE(TxManagerShardMeta) {
         UNIT_ASSERT(!txManager->GetShardMeta(42).IsKnown());
     }
 
+    Y_UNIT_TEST(SetTableMeta) {
+        auto txManager = CreateKqpTransactionManager();
+
+        const TTableId tableId(1, 100);
+        UNIT_ASSERT(!txManager->GetTableMeta(tableId).InitialPartitioning);
+        UNIT_ASSERT(txManager->GetTableMeta(tableId).KeyColumnTypes.empty());
+
+        txManager->SetTableMeta(tableId, IKqpTransactionManager::TTableMeta{
+            .KeyColumnTypes = Uint32KeyColumnTypes()});
+        UNIT_ASSERT(!txManager->GetTableMeta(tableId).InitialPartitioning);
+        UNIT_ASSERT_VALUES_EQUAL(txManager->GetTableMeta(tableId).KeyColumnTypes.size(), 1u);
+
+        // Overwrites the previously stored metadata.
+        txManager->SetTableMeta(tableId, {});
+        UNIT_ASSERT(!txManager->GetTableMeta(tableId).InitialPartitioning);
+        UNIT_ASSERT(txManager->GetTableMeta(tableId).KeyColumnTypes.empty());
+    }
+
     Y_UNIT_TEST(MoveShardToLeavesFreshTargetMetaUnknown) {
         // Metadata is not inherited on split/merge: the target covers a different
         // key range, and it learns its exact borders from its own UpdateShards pass.
@@ -133,14 +151,19 @@ Y_UNIT_TEST_SUITE(TxManagerShardMeta) {
         meta.Borders = TOwnedTableRange(SingleCell(10), true, SingleCell(20), false);
         meta.PartitioningVersion = 5;
         txManager->AddShard(1, false, "/Root/Table", meta);
+        txManager->SetTableMeta(TTableId(1, 100), IKqpTransactionManager::TTableMeta{
+            .KeyColumnTypes = Uint32KeyColumnTypes()});
 
-        UNIT_ASSERT(txManager->MoveShardTo(1, {2}, Uint32KeyColumnTypes()));
+        UNIT_ASSERT(txManager->MoveShardTo(1, {2}));
         UNIT_ASSERT(!txManager->HasShard(1));
         UNIT_ASSERT(!txManager->GetShardMeta(2).IsKnown());
     }
 
     Y_UNIT_TEST(MoveShardToKeepsKnownTargetMeta) {
         auto txManager = CreateKqpTransactionManager();
+
+        txManager->SetTableMeta(TTableId(1, 100), IKqpTransactionManager::TTableMeta{
+            .KeyColumnTypes = Uint32KeyColumnTypes()});
 
         TShardMeta fromMeta;
         fromMeta.TableId = TTableId(1, 100);
@@ -154,7 +177,7 @@ Y_UNIT_TEST_SUITE(TxManagerShardMeta) {
         targetMeta.PartitioningVersion = 9;
         txManager->AddShard(2, false, "/Root/Table", targetMeta);
 
-        UNIT_ASSERT(txManager->MoveShardTo(1, {2}, Uint32KeyColumnTypes()));
+        UNIT_ASSERT(txManager->MoveShardTo(1, {2}));
         UNIT_ASSERT(txManager->GetShardMeta(2).IsKnown());
         UNIT_ASSERT(SameBorders(txManager->GetShardMeta(2).Borders, targetMeta.Borders));
         UNIT_ASSERT_VALUES_EQUAL(txManager->GetShardMeta(2).PartitioningVersion, 9);
@@ -170,8 +193,10 @@ Y_UNIT_TEST_SUITE(TxManagerShardMeta) {
         meta.Borders = TOwnedTableRange(SingleCell(10), true, SingleCell(20), false);
         meta.PartitioningVersion = 5;
         txManager->AddShard(1, false, "/Root/Table", meta);
+        txManager->SetTableMeta(TTableId(1, 100), IKqpTransactionManager::TTableMeta{
+            .KeyColumnTypes = Uint32KeyColumnTypes()});
 
-        UNIT_ASSERT(txManager->MoveShardTo(1, {2}, Uint32KeyColumnTypes()));
+        UNIT_ASSERT(txManager->MoveShardTo(1, {2}));
 
         TShardMeta targetMeta;
         targetMeta.TableId = TTableId(1, 100);
