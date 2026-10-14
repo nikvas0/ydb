@@ -82,6 +82,58 @@ TShardMeta MakeShardMeta(
     return meta;
 }
 
+TShardPartitionIndex::TShardPartitionIndex(TPartitioning::TCPtr partitioning)
+    : Partitioning(std::move(partitioning)) {
+    if (Partitioning) {
+        const auto& partitions = Partitioning->GetTablePartitioning();
+        for (size_t index = 0; index < partitions.size(); ++index) {
+            // emplace keeps the first occurrence, matching the linear scan.
+            ShardIdToPartition.emplace(partitions[index].ShardId, index);
+        }
+    }
+}
+
+TShardPartitionIndex::operator bool() const {
+    return static_cast<bool>(Partitioning);
+}
+
+const TPartitioning::TCPtr& TShardPartitionIndex::GetPartitioning() const {
+    return Partitioning;
+}
+
+void TShardPartitionIndex::Reset() {
+    Partitioning.reset();
+    ShardIdToPartition.clear();
+}
+
+size_t TShardPartitionIndex::FindPartitionIndex(ui64 shardId) const {
+    const auto it = ShardIdToPartition.find(shardId);
+    if (it != ShardIdToPartition.end()) {
+        return it->second;
+    }
+    return Partitioning ? Partitioning->Size() : 0;
+}
+
+// Borders/version of `shardId` in the partitioning held by `index`.
+TShardMeta MakeShardMeta(
+        const TTableId& tableId,
+        const TShardPartitionIndex& index,
+        ui64 shardId,
+        size_t keyColumnsCount) {
+    TShardMeta meta;
+    meta.TableId = tableId;
+    if (!index) {
+        return meta;
+    }
+    const auto& partitioning = index.GetPartitioning();
+    meta.PartitioningVersion = partitioning->GetVersion();
+    const auto shardIndex = index.FindPartitionIndex(shardId);
+    if (shardIndex < partitioning->Size()) {
+        meta.Borders = GetShardKeyRange(*partitioning, shardIndex, keyColumnsCount);
+    }
+    return meta;
+}
+
 // Proto wire format of TShardMeta for TEvKqpInputActorResultInfo.
 void FillShardPartitioningInfo(NKikimrTxDataShard::TShardPartitioningInfo& proto, ui64 shardId, const TShardMeta& meta) {
     proto.SetShardId(shardId);

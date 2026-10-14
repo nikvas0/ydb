@@ -260,11 +260,9 @@ public:
 
     // A shard removed by a split/merge had its participant state moved to every shard
     // covering its range
-    bool MoveShardTo(ui64 fromShardId, const TVector<ui64>& toShardIds) override {
+    bool MoveShardTo(ui64 fromShardId, const TVector<ui64>& toShardIds, const TVector<NScheme::TTypeInfo>& keyColumnTypes) override {
         AFL_ENSURE(State == ETransactionState::COLLECTING);
         AFL_ENSURE(!toShardIds.empty());
-
-        // TODO: verify partitioning meta
 
         // The removed shard's tablet id is gone: GetDeletedShards only returns shards
         // absent from the new partitioning, so the targets cannot contain it. A target
@@ -285,6 +283,28 @@ public:
             // MoveShard to may be called for toShardIds several times in case of merge.
             auto [toIt, inserted] = ShardsInfo.try_emplace(toShardId);
             auto& to = toIt->second;
+            // Verify the partitioning meta when both sides carry it (unknown or
+            // borders-less metadata — e.g. a fresh EnsureShards-only target — is
+            // safely skipped): the target must be a shard of a strictly newer
+            // partitioning whose range intersects the removed shard's range.
+            const bool fromMetaUsable = from.Meta.IsKnown() && !from.Meta.Borders.From.empty();
+            const bool toMetaUsable = to.Meta.IsKnown() && !to.Meta.Borders.From.empty();
+            if (fromMetaUsable && toMetaUsable) {
+                AFL_ENSURE(from.Meta.TableId.HasSamePath(to.Meta.TableId))
+                    ("fromShardId", fromShardId)
+                    ("toShardId", toShardId)
+                    ("fromTableId", from.Meta.TableId)
+                    ("toTableId", to.Meta.TableId);
+                AFL_ENSURE(from.Meta.PartitioningVersion < to.Meta.PartitioningVersion)
+                    ("fromShardId", fromShardId)
+                    ("toShardId", toShardId)
+                    ("fromVersion", from.Meta.PartitioningVersion)
+                    ("toVersion", to.Meta.PartitioningVersion);
+                AFL_ENSURE(!Intersect(keyColumnTypes, from.Meta.Borders, to.Meta.Borders).IsEmptyRange(keyColumnTypes))
+                    ("fromShardId", fromShardId)
+                    ("toShardId", toShardId)
+                    ("keyColumnsCount", keyColumnTypes.size());
+            }
             // Metadata is not inherited from the removed shard: after a split/merge
             // the target covers a different key range, and the targets that receive
             // the transferred writes learn their exact borders from their own

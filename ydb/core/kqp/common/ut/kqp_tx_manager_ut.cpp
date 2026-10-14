@@ -1,6 +1,7 @@
 #include <ydb/core/kqp/common/kqp_tx_manager.h>
 
 #include <ydb/core/scheme/scheme_tablecell.h>
+#include <ydb/core/scheme_types/scheme_type_info.h>
 
 #include <library/cpp/testing/unittest/registar.h>
 
@@ -10,6 +11,11 @@ namespace {
 
 TVector<TCell> SingleCell(ui32 value) {
     return { TCell::Make(value) };
+}
+
+// The key schema of the SingleCell borders below.
+TVector<NScheme::TTypeInfo> Uint32KeyColumnTypes() {
+    return { NScheme::TTypeInfo(NScheme::NTypeIds::Uint32) };
 }
 
 } // namespace
@@ -128,7 +134,7 @@ Y_UNIT_TEST_SUITE(TxManagerShardMeta) {
         meta.PartitioningVersion = 5;
         txManager->AddShard(1, false, "/Root/Table", meta);
 
-        UNIT_ASSERT(txManager->MoveShardTo(1, {2}));
+        UNIT_ASSERT(txManager->MoveShardTo(1, {2}, Uint32KeyColumnTypes()));
         UNIT_ASSERT(!txManager->HasShard(1));
         UNIT_ASSERT(!txManager->GetShardMeta(2).IsKnown());
     }
@@ -148,7 +154,7 @@ Y_UNIT_TEST_SUITE(TxManagerShardMeta) {
         targetMeta.PartitioningVersion = 9;
         txManager->AddShard(2, false, "/Root/Table", targetMeta);
 
-        UNIT_ASSERT(txManager->MoveShardTo(1, {2}));
+        UNIT_ASSERT(txManager->MoveShardTo(1, {2}, Uint32KeyColumnTypes()));
         UNIT_ASSERT(txManager->GetShardMeta(2).IsKnown());
         UNIT_ASSERT(SameBorders(txManager->GetShardMeta(2).Borders, targetMeta.Borders));
         UNIT_ASSERT_VALUES_EQUAL(txManager->GetShardMeta(2).PartitioningVersion, 9);
@@ -165,7 +171,7 @@ Y_UNIT_TEST_SUITE(TxManagerShardMeta) {
         meta.PartitioningVersion = 5;
         txManager->AddShard(1, false, "/Root/Table", meta);
 
-        UNIT_ASSERT(txManager->MoveShardTo(1, {2}));
+        UNIT_ASSERT(txManager->MoveShardTo(1, {2}, Uint32KeyColumnTypes()));
 
         TShardMeta targetMeta;
         targetMeta.TableId = TTableId(1, 100);

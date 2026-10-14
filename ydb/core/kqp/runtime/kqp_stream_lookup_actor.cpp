@@ -634,7 +634,7 @@ private:
 
         auto& resultSet = ev->Get()->Request->ResultSet;
         YQL_ENSURE(resultSet.size() == 1, "Expected one result for range [NULL, +inf)");
-        Partitioning = resultSet[0].KeyDescription->Partitioning;
+        Partitioning = TShardPartitionIndex(resultSet[0].KeyDescription->Partitioning);
 
         ProcessInputRows();
 
@@ -955,7 +955,7 @@ private:
 
         auto guard = BindAllocator();
 
-        StreamLookupWorker->BuildRequests(Partitioning, OperationId);
+        StreamLookupWorker->BuildRequests(Partitioning.GetPartitioning(), OperationId);
         ScheduleNextReads();
     }
 
@@ -974,7 +974,7 @@ private:
                 && *LockMode == NKikimrDataEvents::ELockMode::PESSIMISTIC_NONE
                 && IsolationLevel == NKqpProto::EIsolationLevel::ISOLATION_LEVEL_READ_COMMITTED_RW);
 
-            StreamLockWorker->BuildLockRequests(Partitioning, OperationId);
+            StreamLockWorker->BuildLockRequests(Partitioning.GetPartitioning(), OperationId);
             DrainPendingLocks();
         }
     }
@@ -1377,7 +1377,7 @@ private:
             {"table", StreamLookupWorker->GetTablePath()});
         ResolveShardsInProgress = true;
 
-        Partitioning.reset();
+        Partitioning.Reset();
 
         auto request = MakeHolder<NSchemeCache::TSchemeCacheRequest>();
         request->DatabaseName = Database;
@@ -1450,7 +1450,7 @@ private:
     THashMap<ui64, TString> CacheKeys;
     NUdf::EFetchStatus LastFetchStatus = NUdf::EFetchStatus::Yield;
     NYql::NDq::TDqComputeActorWatermarks* WatermarksTracker;
-    TPartitioning::TCPtr Partitioning;
+    TShardPartitionIndex Partitioning;
     const TDuration SchemeCacheRequestTimeout;
     NActors::TActorId SchemeCacheRequestTimeoutTimer;
     TReadLockInfo LockInfo;

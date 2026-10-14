@@ -3,6 +3,7 @@
 #include <ydb/core/kqp/common/kqp_tx_manager.h>
 #include <ydb/core/protos/tx_datashard.pb.h>
 #include <ydb/core/scheme/scheme_tablecell.h>
+#include <util/generic/hash.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -27,6 +28,43 @@ TOwnedTableRange GetShardKeyRange(const TPartitioning& partitioning, size_t inde
 TShardMeta MakeShardMeta(
     const TTableId& tableId,
     const TPartitioning::TCPtr& partitioning,
+    ui64 shardId,
+    size_t keyColumnsCount);
+
+// A resolved partitioning with an O(1) ShardId-to-partition map. Built once
+// where the partitioning is stored (write controller, buffer lock actor, stream
+// lookup actor) and reused for every shard lookup instead of rescanning the
+// partitions: FindPartitionIndex is O(n), the map lookup is O(1).
+class TShardPartitionIndex {
+public:
+    TShardPartitionIndex() = default;
+
+    // Builds the map in O(partition count). A null partitioning is allowed and
+    // yields an empty index.
+    explicit TShardPartitionIndex(TPartitioning::TCPtr partitioning);
+
+    explicit operator bool() const;
+
+    const TPartitioning::TCPtr& GetPartitioning() const;
+
+    // Drops the partitioning and its index.
+    void Reset();
+
+    // Index of the partition of `shardId`, or `GetPartitioning()->Size()` when
+    // the shard is not in the partitioning (FindPartitionIndex's contract).
+    // O(1).
+    size_t FindPartitionIndex(ui64 shardId) const;
+
+private:
+    TPartitioning::TCPtr Partitioning;
+    THashMap<ui64, size_t> ShardIdToPartition;
+};
+
+// Borders/version of `shardId` in the partitioning held by `index`: the same
+// semantics as the partitioning overload, with an O(1) shard lookup.
+TShardMeta MakeShardMeta(
+    const TTableId& tableId,
+    const TShardPartitionIndex& index,
     ui64 shardId,
     size_t keyColumnsCount);
 

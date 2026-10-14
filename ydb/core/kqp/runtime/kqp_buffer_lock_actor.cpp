@@ -223,7 +223,7 @@ public:
 
     void StartLockTask(ui64 cookie, TLockState& state) {
         auto& worker = state.Worker;
-        worker->BuildLockRequests(Partitioning, LockRequestId);
+        worker->BuildLockRequests(Partitioning.GetPartitioning(), LockRequestId);
 
         while (true) {
             auto [shardId, lockRequest] = worker->PopNextLockRequest();
@@ -577,7 +577,7 @@ public:
             {"table", Settings.TablePath});
         ResolveShardsInProgress = true;
 
-        Partitioning.reset();
+        Partitioning.Reset();
 
         auto request = MakeHolder<NSchemeCache::TSchemeCacheRequest>();
         request->DatabaseName = Settings.Database;
@@ -613,7 +613,7 @@ public:
 
         auto& resultSet = ev->Get()->Request->ResultSet;
         YQL_ENSURE(resultSet.size() == 1, "Expected one result for range [NULL, +inf)");
-        Partitioning = resultSet[0].KeyDescription->Partitioning;
+        Partitioning = TShardPartitionIndex(resultSet[0].KeyDescription->Partitioning);
 
         ProcessResolveResult();
     }
@@ -678,7 +678,7 @@ public:
 
 private:
     TKqpBufferLockSettings Settings;
-    TPartitioning::TCPtr Partitioning;
+    TShardPartitionIndex Partitioning;
     const TString LogPrefix;
     TVector<NScheme::TTypeInfo> KeyColumnTypes;
 

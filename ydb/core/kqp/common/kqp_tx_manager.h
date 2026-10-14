@@ -72,11 +72,17 @@ public:
     // Targets must exactly cover the removed shard's range (computed by the caller
     // from the partitionings) — a wrong target does not hold the transferred lock
     // and would break the commit.
+    // `keyColumnTypes` is the key schema of the moved shard's table, used to verify
+    // the move: when both the removed shard and a target carry filled partitioning
+    // metadata, the target's partitioning version must be strictly newer and its
+    // borders must intersect the removed shard's range (AFL_ENSURE, fail closed).
+    // Shards without filled metadata (e.g. a fresh EnsureShards-only target) are
+    // safely skipped.
     // Returns false when a transferred lock merged inconsistently with a lock already
     // stored on a target (a WriteSeqNum regression: the shard's uncommitted write chain
     // collapsed underneath the stored lock). The lock is marked invalidated and the
     // locks issue is recorded; the caller must abort the transaction.
-    virtual bool MoveShardTo(ui64 fromShardId, const TVector<ui64>& toShardIds) = 0;
+    virtual bool MoveShardTo(ui64 fromShardId, const TVector<ui64>& toShardIds, const TVector<NScheme::TTypeInfo>& keyColumnTypes) = 0;
 
     virtual void BreakLock(ui64 shardId) = 0;
     virtual TVector<NKikimrDataEvents::TLock> GetLocks() const = 0;

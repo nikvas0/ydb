@@ -142,6 +142,43 @@ Y_UNIT_TEST_SUITE(ShardMetaHelpers) {
         UNIT_ASSERT(restored.Borders.From.empty() && restored.Borders.To.empty());
     }
 
+    Y_UNIT_TEST(ShardPartitionIndex) {
+        auto partitioning = MakePartitioning({{1, 10}, {2, 20}, {3, Max<ui32>()}}, 1);
+
+        TShardPartitionIndex index(partitioning);
+        UNIT_ASSERT(index);
+        UNIT_ASSERT(index.GetPartitioning() == partitioning);
+        UNIT_ASSERT_VALUES_EQUAL(index.FindPartitionIndex(1), 0u);
+        UNIT_ASSERT_VALUES_EQUAL(index.FindPartitionIndex(2), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(index.FindPartitionIndex(3), 2u);
+        UNIT_ASSERT_VALUES_EQUAL(index.FindPartitionIndex(4), partitioning->Size());
+
+        TShardPartitionIndex null(nullptr);
+        UNIT_ASSERT(!null);
+        UNIT_ASSERT(!null.GetPartitioning());
+        UNIT_ASSERT_VALUES_EQUAL(null.FindPartitionIndex(1), 0u);
+
+        TShardPartitionIndex empty;
+        UNIT_ASSERT(!empty);
+        UNIT_ASSERT_VALUES_EQUAL(empty.FindPartitionIndex(1), 0u);
+    }
+
+    Y_UNIT_TEST(MakeShardMetaViaIndexMatchesRaw) {
+        auto partitioning = MakePartitioning({{1, 10}, {2, 20}, {3, Max<ui32>()}}, 7);
+        TShardPartitionIndex index(partitioning);
+
+        for (const ui64 shardId : {1ull, 2ull, 3ull, 99ull}) {
+            const auto viaIndex = MakeShardMeta(TTableId(1, 100), index, shardId, 1);
+            const auto raw = MakeShardMeta(TTableId(1, 100), partitioning, shardId, 1);
+            UNIT_ASSERT_VALUES_EQUAL(viaIndex.IsKnown(), raw.IsKnown());
+            UNIT_ASSERT_VALUES_EQUAL(viaIndex.PartitioningVersion, raw.PartitioningVersion);
+            UNIT_ASSERT(SameBorders(viaIndex.Borders, raw.Borders));
+        }
+
+        const auto empty = MakeShardMeta(TTableId(1, 100), TShardPartitionIndex(), 1, 1);
+        UNIT_ASSERT(!empty.IsKnown());
+    }
+
 } // ShardMetaHelpers
 
 } // namespace NKikimr::NKqp
