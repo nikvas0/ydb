@@ -679,6 +679,7 @@ namespace TEvDataShard {
             auto entry = Record.AddTxLocks();
             entry->SetLockId(lockId);
             entry->SetDataShard(shard);
+            entry->SetCreatedOn(shard);
             entry->SetGeneration(generation);
             entry->SetCounter(counter);
             entry->SetSchemeShard(ssId);
