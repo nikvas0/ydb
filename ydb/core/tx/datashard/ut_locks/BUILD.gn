@@ -18,11 +18,14 @@ unittest_executable("ut_locks") {
     "//ydb/public/lib/yson_value",  # peerdir only
     "//ydb/public/sdk/cpp/src/client/result",  # peerdir only
     "//yql/essentials/public/udf/service/exception_policy",  # peerdir only
+    "//ydb/core/tablet_flat/test/libs/exec",
+    "//ydb/core/tablet_flat/test/libs/rows",
+    "//ydb/core/tablet_flat/test/libs/table",
   ]
 
-  sources = [ "//ydb/core/tx/datashard/datashard_ut_locks.cpp" ]
+  sources = [ "//ydb/core/tx/datashard/datashard_ut_locks.cpp", "//ydb/core/tx/datashard/datashard_ut_locks_schema.cpp" ]
 
-  include_dirs = [ "//ydb/core/tx/datashard" ]
+  include_dirs = [ "//ydb/core/tx/datashard", "//ydb/core/tablet_flat" ]
 
   link_select = [
     "YqlServicePolicy=exception_policy",

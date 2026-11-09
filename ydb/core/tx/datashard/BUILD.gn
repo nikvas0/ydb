@@ -209,6 +209,7 @@ library("datashard") {
     "datashard_kqp.cpp",
     "datashard_loans.cpp",
     "datashard_locks_db.cpp",
+    "datashard_locks_schema.cpp",
     "datashard_outreadset.cpp",
     "datashard_overload.cpp",
     "datashard_pipeline.cpp",
