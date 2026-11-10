@@ -2,27 +2,24 @@
 
 ## Build & Test
 
+Run commands from the repository root. Use GN/Ninja for this checkout.
+Keep `ya.make` and `BUILD.gn` in sync when changing build definitions.
+
 ```bash
-# Build
-./ya make --build relwithdebinfo <folder>
+# Regenerate after changing GN build files
+gn gen out/gn --script-executable="$(command -v python3)"
 
-# Run all tests
-./ya make --build relwithdebinfo -tA <folder>
-
-# Run specific test
-./ya make --build relwithdebinfo -tA <folder> -F *test-filter*
-
-# Run tests repeatedly (e.g. to catch flakes)
-./ya make --build relwithdebinfo -tA <folder> -F *test-filter* --test-retries N
+# Build binaries and tests
+ninja -j 24 -C out/gn all tests
 ```
 
-- Tests include build
-- No `-j`
+- Never run `ya make`, even if other repository instructions recommend it.
 - No force rebuild
 - Do not edit sources during compilation: this can cause `null character ignored` errors.
 - Use `2>&1 | tail` for test output
 
-- Test name formats for `-F`: ydb/agents/TESTS.md
+Build before running tests. Use the GN test runner described in
+[ydb/agents/TESTS.md](ydb/agents/TESTS.md). Test logs are in `out/gn/test-results`.
 
 ## C++
 

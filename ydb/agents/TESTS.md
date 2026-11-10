@@ -37,20 +37,24 @@ Upgrade/downgrade tests live under `ydb/tests/compatibility/`.
 
 ## Running tests
 
+From the repository root, build binaries and tests using the
+[root build instructions](../../AGENTS.md), then run:
+
 ```bash
-./ya make --build relwithdebinfo -tA <folder>               # all tests
-./ya make --build relwithdebinfo -tA <folder> -F <filter>   # matching tests
-./ya make -t <folder> -L                                    # list full test names
+python3 build/gn/scripts/run_tests.py \
+    --build-dir out/gn \
+    --script-executable "$(command -v python3)" \
+    --test-size small,medium,large \
+    --test-threads 4 \
+    --strict --filter <tests dir>
 ```
 
-CLI tests (`ya make -tA`) run only on Linux.
+Replace `<tests dir>` with a repository-relative test directory, such as
+`ydb/core/tx/datashard/ut_locks`. The filter matches directory substrings.
+Omit `--filter` to run all selected test sizes, or add `--list` to list tests
+without running them.
 
-`<filter>` is a full test name, its suffix, or a `*` glob (`*part*`):
+The GN runner runs C++ tests registered in `//:tests`; recipe-based, manual,
+and unbuilt tests are skipped.
 
-- C++ (`UNITTEST`, `GTEST`): `TMySuite::MyTest`; `TMySuite` runs the whole suite.
-- Python (pytest, `unittest`): `test_foo.py::TestClass::test_bar[param]`, no class
-  part for module-level tests; `test_foo.py` runs the whole module,
-  `test_foo.py::TestClass::*` the whole class. `test_foo.py::TestClass` without
-  `::*` matches nothing and still reports `Ok`.
-
-Build rules: [`GUIDE.md`](GUIDE.md).
+Test logs and `summary.json` are in `out/gn/test-results`.
