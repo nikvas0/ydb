@@ -62,7 +62,7 @@ library("base") {
     "//ydb/core/audit/audit_config",
     # "//ydb/core/blobstorage/base",
     # "//ydb/core/blobstorage/nodewarden",
-    # "//ydb/core/graph/api",
+    "//ydb/core/graph/api",
     # "//ydb/core/grpc_services",
     # "//ydb/core/node_whiteboard",
     # "//ydb/core/tablet_flat",

@@ -56,6 +56,7 @@ library("provider") {
         "//yql/essentials/providers/common/schema/expr",
         "//yql/essentials/providers/common/structured_token",
         "//yql/essentials/providers/common/transform",
+        "//yql/essentials/providers/pg/expr_nodes",
         "//yql/essentials/providers/result/expr_nodes",
         "//yql/essentials/public/decimal",
         "//yql/essentials/public/result_format",

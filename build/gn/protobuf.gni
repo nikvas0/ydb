@@ -266,7 +266,12 @@ template("protobuf_library") {
         output_dir = "$root_out_dir/" + rebase_path(".", "//") # TODO: doesn't work for some reason
         output_name = _unique_name
 
-        public_deps = [ "//contrib/libs/protobuf" ]
+        # Consumers need the generated headers before compiling, including
+        # through header-only groups that expose this library.
+        public_deps = [
+            "//contrib/libs/protobuf",
+            ":${_name}_codegen",
+        ]
         if (defined(invoker.generate_grpc_services) && invoker.generate_grpc_services) {
             public_deps += [ "//contrib/libs/grpc" ]
         }
@@ -275,8 +280,7 @@ template("protobuf_library") {
         }
 
         # TODO: losing default deps here?
-        deps = [ ":$_gen_target" ]
-        deps += _enum_targets
+        deps = _enum_targets
         if (_enum_targets != []) {
             deps += [ "//tools/enum_parser:runtime" ]
         }

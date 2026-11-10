@@ -47,10 +47,14 @@ template("flatbuffers_library") {
     }
 
     source_set(target_name) {
-        public_deps = [ "//contrib/libs/flatbuffers" ]
+        # Consumers include these generated headers, so their compilation must
+        # wait for the generator even though this source_set compiles no sources.
+        public_deps = [
+            "//contrib/libs/flatbuffers",
+            ":$_gen_target",
+        ]
 
         deps = []
-        deps += [ ":$_gen_target" ]
 
         sources = get_target_outputs(":$_gen_target")
 

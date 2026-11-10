@@ -69,6 +69,8 @@ library("bscontroller") {
     "drop_donor.cpp",
     "get_group.cpp",
     "group_metrics_exchange.cpp",
+    "group_state.cpp",
+    "group_state_actor.cpp",
     "grouper.cpp",
     "init_scheme.cpp",
     "layout_helpers.cpp",
