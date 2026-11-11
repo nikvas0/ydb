@@ -309,7 +309,7 @@ Y_UNIT_TEST(WriteSeqNumsRerouteMergesAppliedAndPending) {
         // the fresh tail op for key 2.
         UNIT_ASSERT_VALUES_EQUAL(
             result->Record.GetTxStats().GetTableAccessStats(0).GetUpdateRow().GetRows(), 2u);
-        UNIT_ASSERT_VALUES_EQUAL(result->Record.GetTxLocks().size(), 2u);
+        UNIT_ASSERT_VALUES_EQUAL(result->Record.GetTxLocks().size(), 1u);
         bool chainAdvanced = false;
         for (const auto& lock : result->Record.GetTxLocks()) {
             if (lock.WriteSeqNumsSize() == 1
@@ -324,9 +324,9 @@ Y_UNIT_TEST(WriteSeqNumsRerouteMergesAppliedAndPending) {
 
     // The second covering shard receives the same merged positions without data (the
     // empty re-routed batch): the duplicate position is skipped, the empty tail
-    // advances the transferred chain. The reply echoes both the shard's own lock and
-    // the transferred ancestor lock carrying the advanced chain position. The first
-    // reply advanced the test's write seq num bookkeeping for the removed shard;
+    // advances the transferred chain. The reply echoes the transferred ancestor
+    // lock carrying the advanced chain position. The first reply advanced the
+    // test's write seq num bookkeeping for the removed shard;
     // reset it so the same merged positions are rebuilt for the empty batch.
     tx.Shard2SeqNum[oldShards.at(0)] = 0;
     {
@@ -342,7 +342,7 @@ Y_UNIT_TEST(WriteSeqNumsRerouteMergesAppliedAndPending) {
         // batch's own ops are empty: the writer still never saw the lost delivery.
         UNIT_ASSERT_VALUES_EQUAL(
             result->Record.GetTxStats().GetTableAccessStats(0).GetUpdateRow().GetRows(), 1u);
-        UNIT_ASSERT_VALUES_EQUAL(result->Record.GetTxLocks().size(), 2u);
+        UNIT_ASSERT_VALUES_EQUAL(result->Record.GetTxLocks().size(), 1u);
         bool chainAdvanced = false;
         for (const auto& lock : result->Record.GetTxLocks()) {
             if (lock.WriteSeqNumsSize() == 1
@@ -412,7 +412,7 @@ Y_UNIT_TEST(WriteSeqNumsAncestorAfterCurrentShardRejected) {
         // own chain, the second stays on the transferred ancestor chain as its
         // already applied position 2: the ancestor op comes after the
         // current-shard op and must be rejected.
-        req->Record.MutableOperations(0)->SetOriginalShard(0);
+        req->Record.MutableOperations(0)->ClearAncestors();
 
         auto reqSender = runtime.AllocateEdgeActor();
         ui32 nodeIndex = reqSender.NodeId() - runtime.GetNodeId(0);
@@ -425,7 +425,7 @@ Y_UNIT_TEST(WriteSeqNumsAncestorAfterCurrentShardRejected) {
             result->Record.GetStatus(),
             NKikimrDataEvents::TEvWriteResult::STATUS_BAD_REQUEST);
         UNIT_ASSERT(result->Record.GetIssues(0).message().Contains(
-            "is positioned after current shard writes in the request"));
+            "Ancestor operations must precede current operations"));
     }
 
     // Neither row of the rejected request was applied.
@@ -484,7 +484,7 @@ Y_UNIT_TEST(WriteSeqNumsAncestorContinuationAfterCurrentShardRejected) {
             result->Record.GetStatus(),
             NKikimrDataEvents::TEvWriteResult::STATUS_BAD_REQUEST);
         UNIT_ASSERT(result->Record.GetIssues(0).message().Contains(
-            "not allowed after current shard writes"));
+            "Fresh ancestor writes are forbidden after current writes"));
     }
 
     // Commit the current shard's write and check that the rejected ancestor row
@@ -536,7 +536,7 @@ Y_UNIT_TEST(WriteSeqNumsAncestorOpsBeforeCurrentShardOps) {
             // chain: a duplicate whose row must be skipped. The second op continues
             // the transferred chain. The third op is re-labeled as a fresh position
             // of the current shard's own chain and comes last.
-            req->Record.MutableOperations(2)->SetOriginalShard(0);
+            req->Record.MutableOperations(2)->ClearAncestors();
             req->Record.MutableOperations(2)->MutableWriteSeqNum()->SetWriteSeqNum(1);
 
             auto reqSender = runtime.AllocateEdgeActor();
@@ -630,7 +630,7 @@ Y_UNIT_TEST(WriteSeqNumsAncestorOpsBeforeCurrentShardOpsInsertReplay) {
         // chain: a duplicate whose row must be skipped. The second op continues
         // the transferred chain. The third op is re-labeled as a fresh position
         // of the current shard's own chain and comes last.
-        req->Record.MutableOperations(2)->SetOriginalShard(0);
+        req->Record.MutableOperations(2)->ClearAncestors();
         req->Record.MutableOperations(2)->MutableWriteSeqNum()->SetWriteSeqNum(1);
 
         auto reqSender = runtime.AllocateEdgeActor();
@@ -744,7 +744,8 @@ Y_UNIT_TEST(WriteSeqNumsMergedAncestorChainsInterleaved) {
         // fresh. The third op is re-labeled to the second transferred chain as
         // its already applied position 1 and comes after the fresh operation of
         // the first chain, which the shard must accept.
-        req->Record.MutableOperations(2)->SetOriginalShard(oldShards.at(1));
+        req->Record.MutableOperations(2)->ClearAncestors();
+        req->Record.MutableOperations(2)->AddAncestors(oldShards.at(1));
         req->Record.MutableOperations(2)->MutableWriteSeqNum()->SetWriteSeqNum(1);
 
         auto reqSender = runtime.AllocateEdgeActor();

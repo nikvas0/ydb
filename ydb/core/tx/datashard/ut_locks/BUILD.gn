@@ -23,7 +23,11 @@ unittest_executable("ut_locks") {
     "//ydb/core/tablet_flat/test/libs/table",
   ]
 
-  sources = [ "//ydb/core/tx/datashard/datashard_ut_locks.cpp", "//ydb/core/tx/datashard/datashard_ut_locks_schema.cpp" ]
+  sources = [
+    "//ydb/core/tx/datashard/datashard_ut_locks.cpp",
+    "//ydb/core/tx/datashard/datashard_ut_locks_schema.cpp",
+    "//ydb/core/tx/datashard/datashard_ut_write_seq_num.cpp",
+  ]
 
   include_dirs = [ "//ydb/core/tx/datashard", "//ydb/core/tablet_flat" ]
 

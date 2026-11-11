@@ -35,6 +35,7 @@ YQL_LAST_ABI_VERSION()
 SRCS(
     datashard_ut_locks.cpp
     datashard_ut_locks_schema.cpp
+    datashard_ut_write_seq_num.cpp
 )
 
 END()
