@@ -264,9 +264,9 @@ public:
             return EExecutionStatus::Executed;
         }
 
-        // Group operations by DataShard: per-group min/max requested seqnum.
-        // A DataShard of 0 in the operation means the current shard; treat non-zero as ancestor.
-        // We normalize: treat 0 and tabletId as the same (current shard).
+        // Group operations by chain owner: per-group min/max requested seqnum.
+        // Empty Ancestors means current; otherwise its first element is the owner.
+        // Branch-aware classification is added separately from the wire transition.
         struct TShardSeqNums {
             ui64 MinRequested = 0;
             ui64 MaxRequested = 0;
@@ -279,7 +279,7 @@ public:
             if (!requested) {
                 continue;
             }
-            const ui64 shardId = op.GetOriginalShard();
+            const ui64 shardId = op.GetAncestors().empty() ? 0 : op.GetAncestors().front();
             const ui64 shardKey = (shardId == 0 || shardId == tabletId) ? 0 : shardId;
 
             auto& seqnums = shard2seqnums[shardKey];
@@ -451,9 +451,22 @@ public:
                 }
                 writeOp->DuplicateWriteOpIdxs.insert(iOp);
             } else {
-                seqnums.SawFreshOp = true;
-                if (shardKey == 0) {
-                    sawCurrentShardOp = true;
+                stored = lock->FindAncestorWriteSeqNumState(*duplicateDataShard, writerIndex);
+            }
+            Y_ENSURE(stored);
+            FillDuplicateWriteResult(*stored, res->Record);
+            writeOp->DuplicateOpsResult = std::move(res);
+
+            // mark duplicate operations as such
+            for (size_t iOp = 0; iOp < operations.size(); ++iOp) {
+                const auto& op = operations[iOp];
+                if (!op.GetWriteSeqNum().WriteSeqNum) {
+                    continue;
+                }
+                const ui64 shardId = op.GetAncestors().empty() ? 0 : op.GetAncestors().front();
+                const ui64 shardKey = (shardId == 0 || shardId == tabletId) ? 0 : shardId;
+                if (shard2seqnums.at(shardKey).isDuplicate) {
+                    writeOp->DuplicateWriteOpIdxs.insert(iOp);
                 }
             }
         }
@@ -511,7 +524,7 @@ public:
             const ui64 requested = op.GetWriteSeqNum().WriteSeqNum;
             if (requested) {
                 writerIndex = op.GetWriteSeqNum().WriterIndex;
-                const ui64 ds = op.GetOriginalShard();
+                const ui64 ds = op.GetAncestors().empty() ? 0 : op.GetAncestors().front();
                 if (ds == 0 || ds == tabletId) {
                     hasCurrentShardSeqNum = true;
                     if (requested > maxCurrentShardRequested) {

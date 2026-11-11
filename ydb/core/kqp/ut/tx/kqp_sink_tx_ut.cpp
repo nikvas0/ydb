@@ -1160,7 +1160,7 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
     static void SetupUncommittedWriteSeqNum(TKikimrSettings& settings) {
         settings.AppConfig.MutableFeatureFlags()->SetEnableDataShardUncommittedWriteSeqNum(true);
         // Split/merge must transfer the tx's write-only locks (with their WriteSeqNum
-        // chains) to the new shards: the re-routed batches carry OriginalShard and
+        // chains) to the new shards: the re-routed batches carry Ancestors and
         // validate against the transferred ancestor chains.
         settings.AppConfig.MutableFeatureFlags()->SetEnableDataShardLocksTransferOnSplit(true);
         auto& writeActorSettings = *settings.AppConfig.MutableTableServiceConfig()->MutableWriteActorSettings();
@@ -1206,7 +1206,7 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
     }
 
     // Wire-level observation state for the uncommitted-write (WriteSeqNum) split/merge
-    // tests: captures TEvWrite operations (WriteSeqNum + OriginalShard per
+    // tests: captures TEvWrite operations (WriteSeqNum, full Ancestors and derived Owner per
     // destination), prepare messages (attached ancestor locks, ReceivingShards) and
     // duplicate TEvWriteResults; optionally suppresses the results of chosen tablets
     // (the write stays applied on the shard, the batch stays pending) and holds the
@@ -1247,10 +1247,10 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             }
         }
 
-        // (destination, WriteSeqNum, OriginalShard, rows) of every data-mode operation.
+        // (destination, WriteSeqNum, Owner, rows, Ancestors) of every data-mode operation.
         // Rows come from the operation payload (0 for the empty re-routed batches that
         // only carry the write chain).
-        TVector<std::tuple<ui64, ui64, ui64, ui64>> WriteOps;
+        TVector<std::tuple<ui64, ui64, ui64, ui64, TVector<ui64>>> WriteOps;
         // Prepare destination -> DataShards of the attached ancestor locks.
         THashMap<ui64, THashSet<ui64>> PrepareAncestorLocks;
         // Prepare destination -> the ReceivingShards list of the prepare message.
@@ -1279,8 +1279,8 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             return TTestActorRuntime::EEventAction::PROCESS;
         }
 
-        TVector<std::tuple<ui64, ui64, ui64, ui64>> WriteOpsSnapshot() const {
-            TVector<std::tuple<ui64, ui64, ui64, ui64>> result;
+        TVector<std::tuple<ui64, ui64, ui64, ui64, TVector<ui64>>> WriteOpsSnapshot() const {
+            TVector<std::tuple<ui64, ui64, ui64, ui64, TVector<ui64>>> result;
             with_lock(Mutex) {
                 result = WriteOps;
             }
@@ -1364,8 +1364,9 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
                     WriteOps.emplace_back(
                         fwd.TabletId,
                         op.GetWriteSeqNum().GetWriteSeqNum(),
-                        op.GetOriginalShard(),
-                        rows);
+                        (op.AncestorsSize() ? op.GetAncestors(0) : fwd.TabletId),
+                        rows,
+                        TVector<ui64>(op.GetAncestors().begin(), op.GetAncestors().end()));
                 }
                 if (CookieTablet == fwd.TabletId) {
                     ObservedCookies.insert(ev->Cookie);
@@ -1760,7 +1761,7 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
     // A partition change (split) during an in-flight consistent (WriteSeqNum) write must
     // re-route only the removed shard's pending batch to the new shards (the unaffected
     // shard's in-flight write is never re-sent). The re-routed batch preserves the original
-    // WriteSeqNum and carries OriginalShard = the removed shard, validates as a duplicate
+    // WriteSeqNum and carries Owner = the removed shard, validates as a duplicate
     // of the transferred ancestor chain (the rows are not re-applied), the new shards join
     // the distributed commit (their prepare carries the ancestor lock of the removed shard)
     // and the transaction commits with every row applied exactly once.
@@ -1858,21 +1859,21 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             auto result = runtime.WaitFuture(future, TDuration::Seconds(60));
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
 
-            // Wire checks: operations to the original shards carry no OriginalShard; the
+            // Wire checks: operations to the original shards carry empty Ancestors; the
             // re-routed operations preserve the original WriteSeqNum and carry
-            // OriginalShard of the removed shard; the new shards answered as duplicates
+            // Owner of the removed shard; the new shards answered as duplicates
             // (the transferred rows are not re-applied); the unaffected shard was never
             // re-sent (its cookie set did not grow).
             const auto writeOps = wire.WriteOpsSnapshot();
             THashSet<ui64> rerouteDestinations;
-            for (const auto& [dest, seqNum, originalShard, rows] : writeOps) {
+            for (const auto& [dest, seqNum, originalShard, rows, ancestors] : writeOps) {
                 if (initialShards.contains(dest)) {
                     UNIT_ASSERT_VALUES_EQUAL_C(originalShard, dest,
-                        "operations to the original shards must carry OriginalShard");
+                        "operations to the original shards must carry Owner");
                 } else {
                     rerouteDestinations.insert(dest);
                     UNIT_ASSERT_VALUES_EQUAL_C(originalShard, splitShard,
-                        "a re-routed operation must carry OriginalShard of the removed shard");
+                        "a re-routed operation must carry Owner of the removed shard");
                     UNIT_ASSERT_VALUES_EQUAL_C(seqNum, 1u,
                         "the re-routed batch must preserve the original WriteSeqNum");
                     UNIT_ASSERT_C(rows > 0,
@@ -2048,7 +2049,7 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             // The second write targets keys of the removed shard through the stale
             // partitioning: the re-route continues the transferred ancestor chain
             // (WriteSeqNum 2 == 1 + 1, the first write's batch took position 1,
-            // OriginalShard = the removed shard). The write actor persists across the
+            // Owner = the removed shard). The write actor persists across the
             // queries of the transaction, so the chain position is not restarted from 1.
             {
                 auto result = Kikimr->RunCall([&] { return session.ExecuteQuery(Q_(R"(
@@ -2063,14 +2064,14 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
                 const auto writeOps = wire.WriteOpsSnapshot();
                 THashSet<ui64> rerouteDestinations;
                 THashSet<ui64> dataDestinations;
-                for (const auto& [dest, seqNum, originalShard, rows] : writeOps) {
+                for (const auto& [dest, seqNum, originalShard, rows, ancestors] : writeOps) {
                     if (initialShards.contains(dest)) {
                         UNIT_ASSERT_VALUES_EQUAL_C(originalShard, dest,
-                            "operations to the original shards must carry OriginalShard");
+                            "operations to the original shards must carry Owner");
                     } else {
                         rerouteDestinations.insert(dest);
                         UNIT_ASSERT_VALUES_EQUAL_C(originalShard, splitShard,
-                            "a re-routed operation must carry OriginalShard of the removed shard");
+                            "a re-routed operation must carry Owner of the removed shard");
                         UNIT_ASSERT_VALUES_EQUAL_C(seqNum, 2u,
                             "the re-routed batch must continue the transferred chain at 2");
                         if (rows > 0) {
@@ -2110,8 +2111,8 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             }
 
             // The third write routes by the updated partitioning straight to the new
-            // shards: fresh current chains starting at WriteSeqNum 1 with no
-            // OriginalShard (the frozen ancestors accept them because they arrive after
+            // shards: fresh current chains starting at WriteSeqNum 1 with
+            // empty Ancestors (the frozen ancestors accept them because they arrive after
             // all ancestor-continuation batches of the same destination).
             {
                 auto result = Kikimr->RunCall([&] { return session.ExecuteQuery(Q_(R"(
@@ -2130,12 +2131,12 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
 
             // The commit-time flush routed keys 5 and 12 by the updated partitioning
             // straight to the new shards: fresh current chains starting at WriteSeqNum 1
-            // with no OriginalShard (the frozen ancestors accept them because they arrive
+            // with empty Ancestors (the frozen ancestors accept them because they arrive
             // after all ancestor-continuation batches of the same destination).
             {
                 const auto writeOps = wire.WriteOpsSnapshot();
                 THashSet<ui64> freshDestinations;
-                for (const auto& [dest, seqNum, originalShard, rows] : writeOps) {
+                for (const auto& [dest, seqNum, originalShard, rows, ancestors] : writeOps) {
                     if (newShards.contains(dest) && originalShard == dest) {
                         UNIT_ASSERT_C(rows > 0, "a fresh batch must carry rows");
                         freshDestinations.insert(dest);
@@ -2404,14 +2405,14 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             const auto writeOps = wire.WriteOpsSnapshot();
             THashSet<ui64> rerouteDestinations;
             THashSet<ui64> dataDestinations;
-            for (const auto& [dest, seqNum, originalShard, rows] : writeOps) {
+            for (const auto& [dest, seqNum, originalShard, rows, ancestors] : writeOps) {
                 if (initialShards.contains(dest)) {
                     UNIT_ASSERT_VALUES_EQUAL_C(originalShard, dest,
-                        "operations to the original shards must carry OriginalShard");
+                        "operations to the original shards must carry Owner");
                 } else {
                     rerouteDestinations.insert(dest);
                     UNIT_ASSERT_VALUES_EQUAL_C(originalShard, splitShard,
-                        "a re-routed operation must carry OriginalShard of the removed shard");
+                        "a re-routed operation must carry Owner of the removed shard");
                     UNIT_ASSERT_VALUES_EQUAL_C(seqNum, 1u,
                         "the re-routed batch must preserve the original WriteSeqNum");
                     if (rows > 0) {
@@ -2579,7 +2580,7 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
                 const auto writeOps = wire.WriteOpsSnapshot();
                 THashSet<ui64> routedOriginalShards;
                 THashSet<ui64> routedSeqNums;
-                for (const auto& [dest, seqNum, originalShard, rows] : writeOps) {
+                for (const auto& [dest, seqNum, originalShard, rows, ancestors] : writeOps) {
                     if (dest == mergedShard) {
                         UNIT_ASSERT_VALUES_EQUAL_C(seqNum, 1u,
                             "the re-routed batches must preserve the original WriteSeqNums");
@@ -2728,7 +2729,7 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             ui64 emptyTarget = 0;
             {
                 THashSet<ui64> dataDestinations;
-                for (const auto& [dest, seqNum, originalShard, rows] : wire.WriteOpsSnapshot()) {
+                for (const auto& [dest, seqNum, originalShard, rows, ancestors] : wire.WriteOpsSnapshot()) {
                     if (newShards.contains(dest) && rows > 0) {
                         dataDestinations.insert(dest);
                     }
@@ -2748,7 +2749,7 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
 
             {
                 const auto writeOps = wire.WriteOpsSnapshot();
-                for (const auto& [dest, seqNum, originalShard, rows] : writeOps) {
+                for (const auto& [dest, seqNum, originalShard, rows, ancestors] : writeOps) {
                     UNIT_ASSERT_C(dest != emptyTarget || rows == 0,
                         "the empty target must not receive data writes");
                 }
@@ -3000,11 +3001,11 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
     }
 
     // Multi-hop re-route: the first re-route sends the batch to a brand-new shard with
-    // OriginalShard = the original removed shard; the batch is held undelivered there,
-    // the intermediate shard is split as well, and the second re-route must keep the
-    // ORIGINAL OriginalShard (not the intermediate shard) and the original WriteSeqNum
-    // (invariant 14). The ancestor chain transferred through the intermediate shard
-    // lets the final destination apply the batch as a continuation, and the commit
+    // Owner = the original removed shard; the batch is held undelivered there,
+    // the intermediate shard is split as well, and the second reroute must preserve
+    // Owner and WriteSeqNum and append the intermediate shard to Ancestors. The
+    // ancestor chain transferred through the intermediate shard lets the final
+    // destination apply the batch as a continuation, and the commit
     // succeeds.
     class TUncommittedWriteSeqNumMultiHopReroute : public TTableDataModificationTester {
     protected:
@@ -3129,8 +3130,9 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             {
                 TDispatchOptions opts;
                 opts.FinalEvents.emplace_back([&](IEventHandle&) {
-                    for (const auto& [dest, seqNum2, originalShard, rows2] : wire.WriteOpsSnapshot()) {
-                        if (originalShard == splitShard && finalShardCandidates.contains(dest)) {
+                    for (const auto& [dest, seqNum2, originalShard, rows2, ancestors] : wire.WriteOpsSnapshot()) {
+                        if (ancestors == TVector<ui64>{splitShard, intermediateShard}
+                                && finalShardCandidates.contains(dest)) {
                             return true;
                         }
                     }
@@ -3141,14 +3143,23 @@ Y_UNIT_TEST_SUITE(KqpSinkTx) {
             auto result = runtime.WaitFuture(future, TDuration::Seconds(60));
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
 
-            // The second re-route preserved the ORIGINAL OriginalShard (invariant 14:
-            // not overwritten with the intermediate shard) and the original WriteSeqNum.
+            // The second reroute extends Ancestors while preserving its first element
+            // (Owner) and the original WriteSeqNum.
             {
                 const auto writeOps = wire.WriteOpsSnapshot();
                 THashSet<ui64> finalDestinations;
                 THashSet<ui64> dataFinalDestinations;
-                for (const auto& [dest, seqNum, originalShard, rows] : writeOps) {
+                for (const auto& [dest, seqNum, originalShard, rows, ancestors] : writeOps) {
                     if (finalShardCandidates.contains(dest) && originalShard == splitShard) {
+                        // The surviving first-split child keeps [source]; children of
+                        // the second split must include the intermediate destination.
+                        const TVector<ui64> expectedAncestors = newShards1.contains(dest)
+                            ? TVector<ui64>{splitShard}
+                            : TVector<ui64>{splitShard, intermediateShard};
+                        UNIT_ASSERT_VALUES_EQUAL(ancestors.size(), expectedAncestors.size());
+                        for (size_t i = 0; i < expectedAncestors.size(); ++i) {
+                            UNIT_ASSERT_VALUES_EQUAL(ancestors[i], expectedAncestors[i]);
+                        }
                         UNIT_ASSERT_VALUES_EQUAL_C(seqNum, 2u,
                             "the twice re-routed batch must preserve the original WriteSeqNum");
                         finalDestinations.insert(dest);
