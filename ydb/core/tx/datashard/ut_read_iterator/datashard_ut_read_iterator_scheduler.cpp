@@ -1,5 +1,6 @@
 #include <ydb/core/tx/datashard/ut_common/datashard_ut_common.h>
 
+#include <ydb/core/base/appdata.h>
 #include <ydb/core/kqp/runtime/scheduler/kqp_schedulable_read.h>
 #include <ydb/core/kqp/runtime/scheduler/tree/common.h>
 
@@ -180,6 +181,41 @@ struct TSchedulerTestHelper {
     void AddZeroQuotaPool(const TString& poolId) const {
         UpdatePoolQuota(0., poolId);
     }
+
+    NKqp::NScheduler::TComputeSchedulerPtr GetScheduler() const {
+        return Server->GetRuntime()->GetAppData(0).KqpComputeScheduler;
+    }
+
+    void SetSchedulerPoolQuota(bool enabled) const {
+        using namespace NKqp::NScheduler;
+        using namespace NKqp::NScheduler::NHdrf;
+
+        auto scheduler = GetScheduler();
+        Y_ABORT_UNLESS(scheduler);
+
+        if (enabled) {
+            scheduler->AddOrUpdatePool(TEST_DATABASE_ID, TEST_POOL_ID, TStaticAttributes{
+                .CpuLimit = 1,
+                .ReadLimit = TDuration::MilliSeconds(10),
+            });
+        } else {
+            scheduler->AddOrUpdatePool(TEST_DATABASE_ID, TEST_POOL_ID, TStaticAttributes{
+                .CpuLimit = 0,
+                .ReadLimit = TDuration::Zero(),
+            });
+        }
+        scheduler->UpdateFairShare();
+    }
+
+    double GetPoolFairShare() const {
+        using namespace NKqp::NScheduler;
+        using namespace NKqp::NScheduler::NHdrf;
+
+        auto shares = GetScheduler()->GetLeafPoolFairShares();
+        auto it = shares.find(TFullPoolId{TEST_DATABASE_ID, TEST_POOL_ID});
+        UNIT_ASSERT(it != shares.end());
+        return it->second;
+    }
 };
 
 } // namespace
@@ -307,6 +343,60 @@ Y_UNIT_TEST_SUITE(DataShardReadIteratorScheduler) {
         UNIT_ASSERT(result);
         UNIT_ASSERT_VALUES_EQUAL(result->Record.GetStatus().GetCode(), Ydb::StatusIds::SUCCESS);
         UNIT_ASSERT_VALUES_EQUAL(result->GetRowsCount(), 1);
+    }
+
+    Y_UNIT_TEST(ThrottledFirstReadStillAcquiresReadLock) {
+        TSchedulerTestHelper helper(/*readLimitMs=*/10u);
+        helper.UpsertMany(1, 2);
+
+        {
+            auto request = helper.MakeRangeReadRequest(1, 1, 2, /*maxRowsInResult=*/1);
+            request->Record.SetMaxRows(1);
+            auto result = helper.SendRead(request.release());
+            UNIT_ASSERT(result);
+            UNIT_ASSERT_VALUES_EQUAL(result->Record.GetStatus().GetCode(), Ydb::StatusIds::SUCCESS);
+            UNIT_ASSERT_VALUES_EQUAL(result->GetRowsCount(), 1);
+            UNIT_ASSERT(!result->Record.GetFinished());
+        }
+
+        helper.SetSchedulerPoolQuota(false);
+        UNIT_ASSERT_VALUES_EQUAL(helper.GetPoolFairShare(), 0.0);
+
+        auto& runtime = *helper.Server->GetRuntime();
+
+        TVector<TAutoPtr<IEventHandle>> blockedContinues;
+        auto oldObserver = runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& event) {
+            if (event->GetTypeRewrite() == TEvDataShard::TEvReadContinue::EventType) {
+                blockedContinues.push_back(event.Release());
+                return TTestActorRuntime::EEventAction::DROP;
+            }
+            return TTestActorRuntime::EEventAction::PROCESS;
+        });
+
+        const ui64 lockTxId = 1011121314;
+        auto request = helper.MakeReadRequest(2);
+        AddKeyQuery(*request, {1, 1, 1});
+        request->Record.SetLockTxId(lockTxId);
+        helper.SendReadAsync(request.release());
+
+        runtime.WaitFor("throttled first read", [&] { return blockedContinues.size() >= 1; });
+
+        helper.SetSchedulerPoolQuota(true);
+        UNIT_ASSERT(helper.GetPoolFairShare() > 0.0);
+
+        runtime.SetObserverFunc(oldObserver);
+        for (auto& event : blockedContinues) {
+            runtime.Send(event.Release(), 0, /* viaActorSystem */ true);
+        }
+        blockedContinues.clear();
+
+        auto result = helper.WaitResult();
+        UNIT_ASSERT(result);
+        UNIT_ASSERT_VALUES_EQUAL(result->Record.GetStatus().GetCode(), Ydb::StatusIds::SUCCESS);
+        UNIT_ASSERT_VALUES_EQUAL(result->GetRowsCount(), 1);
+
+        UNIT_ASSERT_VALUES_EQUAL(result->Record.TxLocksSize(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(result->Record.BrokenTxLocksSize(), 0);
     }
 
     // When the datashard receives a read request with a pool ID that is not registered
