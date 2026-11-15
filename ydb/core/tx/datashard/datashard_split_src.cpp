@@ -155,9 +155,19 @@ public:
             const bool lockTransferEnabled = AppData(ctx)
                 ->FeatureFlags.GetEnableDataShardLocksTransferOnSplit();
             auto lockTransferPredicate = [lockTransferEnabled](const TLockInfo& lock) {
-                return lockTransferEnabled
-                    && !lock.IsBroken()
-                    && lock.IsPersistent() && lock.GetReadTables().empty();
+                if (!lockTransferEnabled || (!lock.IsPersistent() && !lock.IsTrackingOnly())) {
+                    return false;
+                }
+                if (lock.IsBroken() || lock.IsTrackingOnly()) {
+                    return true;
+                }
+                if (!lock.GetReadTables().empty()) {
+                    return false;
+                }
+                // WSN mode is uniform across the transaction. Current or
+                // ancestor WSN state identifies an ordinary transferable lock.
+                return !lock.GetWriteSeqNumStates().empty()
+                    || !lock.GetAncestorLocks().empty();
             };
 
             auto countBefore = Self->SysLocksTable().GetLocks().size();
@@ -202,10 +212,19 @@ public:
                 srcLockInfo.SetCounter(lock.GetRawCounter());
                 srcLockInfo.SetCreateTimestamp(lock.GetCreationTime().MicroSeconds());
                 srcLockInfo.SetFlags(ui64(lock.GetFlags()));
+                if (lock.IsBroken()) {
+                    // Preserve the failed transaction until its normal owner
+                    // subscription removes it; no logical copies are valid.
+                    srcLockInfo.SetFlags(0);
+                    continue;
+                }
 
                 auto writeSeqNumStateToProto = [](const TWriteSeqNumState& state, auto* proto) {
                     proto->SetWriterIndex(state.WriterIndex);
                     proto->SetWriteSeqNum(state.WriteSeqNum);
+                    if (state.GcWriteSeqNum) {
+                        proto->SetGcWriteSeqNum(*state.GcWriteSeqNum);
+                    }
                     if (!state.SerializedResult.empty()) {
                         proto->SetSerializedResult(state.SerializedResult);
                     }
@@ -219,28 +238,45 @@ public:
                     }
                 };
 
-                for (const auto& [_, state] : lock.GetWriteSeqNumStates()) {
-                    if (state.WriteSeqNum == 0) {
-                        continue;
-                    }
-                    writeSeqNumStateToProto(state, srcLockInfo.AddWriteSeqNumStates());
-                }
-
-                // Forward grandparent ancestor locks (multi-hop split/merge)
-                for (const auto& [tabletId, ancestorLock] : lock.GetAncestorLocks()) {
+                Y_ENSURE(Self->TableInfos.size() == 1);
+                const auto& sourceRange = Self->TableInfos.begin()->second->Range;
+                auto addAncestor = [&](const TAncestorLock& ancestor) {
                     auto& proto = *srcLockInfo.AddAncestorLocks();
-                    proto.SetTabletId(ancestorLock.TabletId);
-                    proto.SetCreatedOn(ancestorLock.CreatedOn);
-                    proto.SetGeneration(ancestorLock.Generation);
-                    proto.SetCounter(ancestorLock.Counter);
-                    proto.SetCreateTimestamp(ancestorLock.CreationTime.MicroSeconds());
-                    proto.SetFlags(ui64(ancestorLock.Flags));
-                    for (const auto& [_, state] : ancestorLock.WriteSeqNumStates) {
-                        if (state.WriteSeqNum == 0) {
-                            continue;
-                        }
+                    proto.SetTabletId(ancestor.TabletId);
+                    proto.SetCreatedOn(ancestor.CreatedOn);
+                    proto.SetGeneration(ancestor.Generation);
+                    proto.SetCounter(ancestor.Counter);
+                    proto.SetCreateTimestamp(ancestor.CreationTime.MicroSeconds());
+                    proto.SetFlags(ui64(ancestor.Flags));
+                    if (ancestor.CreatedOnRange) {
+                        ancestor.CreatedOnRange->Serialize(*proto.MutableCreatedOnRange());
+                    } else {
+                        Y_ENSURE(ancestor.CreatedOn == Self->TabletID());
+                        sourceRange.Serialize(*proto.MutableCreatedOnRange());
+                    }
+                    for (const auto& [_, state] : ancestor.WriteSeqNumStates) {
                         writeSeqNumStateToProto(state, proto.AddWriteSeqNumStates());
                     }
+                };
+
+                // Only WSN-bearing local state becomes a new ancestor. Existing
+                // ancestors and lifetime trackers do not create a current copy.
+                if (!lock.GetWriteSeqNumStates().empty()) {
+                    TAncestorLock current;
+                    current.TabletId = current.CreatedOn = Self->TabletID();
+                    current.Generation = lock.GetGeneration();
+                    current.Counter = lock.GetRawCounter();
+                    current.CreationTime = lock.GetCreationTime();
+                    current.Flags = lock.GetFlags();
+                    current.WriteSeqNumStates = lock.GetWriteSeqNumStates();
+                    for (auto& [_, state] : current.WriteSeqNumStates) {
+                        Y_ENSURE(state.Branches.empty());
+                        state.Branches.push_back({{Self->TabletID()}, state.WriteSeqNum, state.SerializedResult});
+                    }
+                    addAncestor(current);
+                }
+                for (const auto& [_, ancestor] : lock.GetAncestorLocks()) {
+                    addAncestor(ancestor);
                 }
 
                 for (const auto& pathId : lock.GetWriteTables()) {
@@ -330,7 +366,7 @@ public:
         return true;
     }
 
-    void Complete(const TActorContext &) override {
+    void Complete(const TActorContext&) override {
     }
 };
 
@@ -496,9 +532,48 @@ public:
                     snapshot->SetReplicationSourceOffsetsBytes(sourceOffsetsBytes);
                 }
 
-                // Attach qualifying persistent write-only locks as ancestor locks for dst
-                for (const auto& ancestorLock : Self->SrcLocksToTransfer) {
-                    *snapshot->AddLocks() = ancestorLock;
+                // Logical copies follow CreatedOnRange. Every other destination
+                // retains only the transaction's lifetime and borrowed references.
+                const TSerializedTableRange destinationRange(dstRangeDescr.GetKeyRangeBegin(),
+                    dstRangeDescr.GetKeyRangeEnd(), true, false);
+                THashSet<ui64> logicalIds;
+                for (const auto& sourceLock : Self->SrcLocksToTransfer) {
+                    if (sourceLock.GetCounter() == Max<ui64>()) {
+                        logicalIds.insert(sourceLock.GetLockId());
+                        *snapshot->AddLocks() = sourceLock;
+                        continue;
+                    }
+                    auto filtered = sourceLock;
+                    filtered.ClearAncestorLocks();
+                    for (const auto& ancestor : sourceLock.GetAncestorLocks()) {
+                        const TSerializedTableRange createdRange(ancestor.GetCreatedOnRange());
+                        const auto sourceIntersection = Intersect(tableInfo.KeyColumnTypes,
+                            tableInfo.GetTableRange(), createdRange.ToTableRange());
+                        if (!Intersect(tableInfo.KeyColumnTypes, sourceIntersection,
+                                destinationRange.ToTableRange()).IsEmptyRange(tableInfo.KeyColumnTypes)) {
+                            *filtered.AddAncestorLocks() = ancestor;
+                        }
+                    }
+                    if (filtered.AncestorLocksSize()) {
+                        logicalIds.insert(sourceLock.GetLockId());
+                    } else {
+                        filtered.Clear();
+                        filtered.SetLockId(sourceLock.GetLockId());
+                        filtered.SetLockNodeId(sourceLock.GetLockNodeId());
+                        filtered.SetFlags(ui64(ELockFlags::TrackingOnly));
+                    }
+                    *snapshot->AddLocks() = std::move(filtered);
+                }
+                for (auto& lock : *snapshot->MutableLocks()) {
+                    // A conflict with an out-of-range transaction has no local
+                    // rows to protect. Trackers never acquire conflict edges.
+                    auto conflicts = lock.GetConflicts();
+                    lock.ClearConflicts();
+                    for (ui64 conflictId : conflicts) {
+                        if (logicalIds.contains(conflictId)) {
+                            lock.AddConflicts(conflictId);
+                        }
+                    }
                 }
 
                 // Persist snapshot data so that it can be sent if this datashard restarts

@@ -4179,6 +4179,7 @@ void TDataShard::DoPeriodicTasks(const TActorContext &ctx) {
     // the shard. Stop active direct imports on the next periodic check as well.
     AbortDirectImportsForSpace();
     UpdateLagCounters(ctx);
+    SetCounter(COUNTER_LOCKS_TRACKING_ONLY, SysLocks.TrackingOnlyLocksCount());
     UpdateChangeExchangeLag(ctx.Now());
     UpdateTableStats(ctx);
     SendPeriodicTableStats(ctx);
