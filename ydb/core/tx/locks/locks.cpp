@@ -6,6 +6,8 @@
 #include <ydb/core/tablet_flat/flat_dbase_scheme.h>
 #include <ydb/core/base/appdata.h>
 
+#include <util/generic/map.h>
+
 #define YDB_LOG_THIS_FILE_COMPONENT NKikimrServices::TX_DATASHARD
 
 namespace NKikimr {
@@ -126,6 +128,62 @@ std::optional<TSerializedTableRange> DeserializeLockCreatedOnRange(const TString
     NKikimrTx::TKeyRange proto;
     Y_ENSURE(proto.ParseFromString(data), "Invalid persisted lock range");
     return TSerializedTableRange(proto);
+}
+
+bool TAncestorLock::Merge(const TAncestorLock& other, TString* error) {
+    auto fail = [&](TString reason) {
+        if (error) {
+            *error = TStringBuilder() << "Logical lock " << TabletId << ":" << CreatedOn << ": " << reason;
+        }
+        return false;
+    };
+    if (error) {
+        error->clear();
+    }
+    if (GetKey() != other.GetKey()) {
+        return fail("different key");
+    }
+    if (Generation != other.Generation) {
+        return fail("different generation");
+    }
+    if (Counter != other.Counter) {
+        return fail("different counter");
+    }
+    if (SerializeLockCreatedOnRange(CreatedOnRange) != SerializeLockCreatedOnRange(other.CreatedOnRange)) {
+        return fail("different creation range");
+    }
+
+    auto merged = WriteSeqNumStates;
+    for (const auto& [writer, incoming] : other.WriteSeqNumStates) {
+        auto [it, inserted] = merged.try_emplace(writer, incoming);
+        if (inserted) {
+            continue;
+        }
+        auto& state = it->second;
+        // Only the current chain on CreatedOn may advance this writer's GC bound.
+        // Transfer freezes it in the ancestor state, so all copies of the same
+        // (TabletId, CreatedOn, writer) must agree, including an unset bound.
+        if (state.GcWriteSeqNum != incoming.GcWriteSeqNum) {
+            return fail(TStringBuilder() << "different GC WSN for writer " << writer);
+        }
+        state.WriteSeqNum = Max(state.WriteSeqNum, incoming.WriteSeqNum);
+        // Index once per writer instead of rescanning all accumulated paths for
+        // each incoming branch. Store offsets: appending can relocate the vector.
+        TMap<TVector<ui64>, size_t> branchIndex;
+        for (size_t i = 0; i < state.Branches.size(); ++i) {
+            branchIndex.emplace(state.Branches[i].ShardsPath, i);
+        }
+        for (const auto& branch : incoming.Branches) {
+            auto [position, inserted] = branchIndex.emplace(branch.ShardsPath, state.Branches.size());
+            if (inserted) {
+                state.Branches.push_back(branch);
+            } else if (state.Branches[position->second].WriteSeqNum != branch.WriteSeqNum) {
+                return fail(TStringBuilder() << "different WSN for the same branch of writer " << writer);
+            }
+        }
+    }
+    WriteSeqNumStates = std::move(merged);
+    return true;
 }
 
 // TLockInfo
@@ -534,6 +592,11 @@ void TLockInfo::CleanupConflicts() {
 }
 
 bool TLockInfo::RestoreInMemoryState(const ILocksDb::TLockRow& lockRow) {
+    if (IsTrackingOnly()) {
+        // A promotion in the previous generation may have failed to persist.
+        // The durable tracker must not inherit that attempt's logical state.
+        return false;
+    }
     SetBreakerInfo(lockRow.BreakerQuerySpanId, lockRow.BreakerNodeId);
 
     auto flags = ELockFlags(lockRow.Flags);
@@ -671,6 +734,37 @@ void TLockInfo::SetFrozen(ILocksDb* db) {
     }
 }
 
+void TLockInfo::SetCurrentLock(ILocksDb* db) {
+    if (!HasCurrentLock()) {
+        Flags |= ELockFlags::Current;
+        if (db && IsPersistent()) {
+            db->PersistLockFlags(LockId, ui64(Flags & ELockFlags::PersistentMask));
+            AddWaitPersistentCallback(db);
+        }
+    }
+}
+
+void TLockInfo::SetTrackingOnly(bool value, ILocksDb* db) {
+    if (IsTrackingOnly() == value) {
+        return;
+    }
+    if (value) {
+        Y_ENSURE(LockNodeId);
+        Y_ENSURE(!HasCurrentLock() && AncestorLocks.empty() && WriteSeqNumStates.empty());
+        Y_ENSURE(ReadTables.empty() && WriteTables.empty() && !IsFrozen());
+        Y_ENSURE(ConflictLocks.empty() && VolatileDependencies.empty());
+        Flags |= ELockFlags::TrackingOnly;
+        ++Locker->TrackingOnlyLocksCount_;
+    } else {
+        Flags &= ~ELockFlags::TrackingOnly;
+        --Locker->TrackingOnlyLocksCount_;
+    }
+    if (db && IsPersistent()) {
+        db->PersistLockFlags(LockId, ui64(Flags & ELockFlags::PersistentMask));
+        AddWaitPersistentCallback(db);
+    }
+}
+
 bool TLockInfo::SetWriteSeqNum(ui64 writerIndex, ui64 writeSeqNum, ILocksDb* db) {
     auto& state = WriteSeqNumStates[writerIndex];
     state.WriterIndex = writerIndex;
@@ -695,20 +789,24 @@ void TLockInfo::SetWriteSeqNumResult(ui64 writerIndex, TString serializedResult,
 
 void TLockInfo::AddWaitPersistentCallback(ILocksDb* db) {
     ++WaitPersistentCounter;
-    db->OnPersistent([lock = TLockInfo::TPtr(this)]() {
+    auto done = [lock = TLockInfo::TPtr(this)]() {
         --lock->WaitPersistentCounter;
-    });
+    };
+    db->OnPersistent(done);
+    db->OnRollback(std::move(done));
 }
 
 void TLockInfo::AddWaitPersistentCallback(ILocksDb* db, TVector<TLockInfo::TPtr>&& locks) {
     for (auto& lock : locks) {
         ++lock->WaitPersistentCounter;
     }
-    db->OnPersistent([locks = std::move(locks)]() {
+    auto done = [locks = std::move(locks)]() {
         for (auto& lock : locks) {
             --lock->WaitPersistentCounter;
         }
-    });
+    };
+    db->OnPersistent(done);
+    db->OnRollback(std::move(done));
 }
 
 // TTableLocks
@@ -1047,6 +1145,8 @@ TLockInfo::TPtr TLockLocker::GetOrAddLock(ui64 lockId, ui32 lockNodeId) {
         return nullptr;
     }
 
+    // Persistent trackers share the limit and cannot be evicted: removing one
+    // would discard the provenance of its borrowed transaction references.
     while (Locks.size() >= LockLimit()) {
         if (!BrokenLocks.Empty()) {
             // We remove broken locks first
@@ -1081,6 +1181,7 @@ TLockInfo::TPtr TLockLocker::AddLock(const ILocksDb::TLockRow& row) {
     TLockInfo::TPtr lock = MakeIntrusive<TLockInfo>(this, row);
     Y_ENSURE(lock->IsPersistent());
     Locks[row.LockId] = lock;
+    TrackingOnlyLocksCount_ += lock->IsTrackingOnly();
     if (row.LockNodeId) {
         PendingSubscribeLocks.emplace_back(row.LockId, row.LockNodeId);
     }
@@ -1165,6 +1266,7 @@ void TLockLocker::RemoveOneLock(ui64 lockTxId, ILocksDb* db) {
         }
         LocksWithRanges.Remove(txLock.Get());
         txLock->CleanupConflicts();
+        TrackingOnlyLocksCount_ -= txLock->IsTrackingOnly();
         Locks.erase(it);
 
         if (txLock->IsPersistent()) {
@@ -1219,6 +1321,7 @@ void TLockLocker::RemoveSchema(const TPathId& tableId, ILocksDb* db) {
     BrokenLocks.Clear();
     BrokenPersistentLocks.Clear();
     BrokenLocksCount_ = 0;
+    TrackingOnlyLocksCount_ = 0;
     CleanupPending.clear();
     CleanupCandidates.clear();
     PendingSubscribeLocks.clear();
@@ -1491,6 +1594,40 @@ TLocksUpdate::~TLocksUpdate() {
 
 // TSysLocks
 
+void TSysLocks::ActivateLock(TLockInfo& lock, ILocksDb& db) {
+    if (!lock.IsTrackingOnly()) {
+        return;
+    }
+    // ApplyLocks needs the new logical state in this Execute (including lock
+    // echo and WSN updates), so publishing only in OnCommit is too late. All
+    // logical state is new for a tracker; undo it if localdb rolls back.
+    db.OnRollback([this, lock = TLockInfo::TPtr(&lock), flags = lock.Flags] {
+        for (const auto& tableId : lock->ReadTables) {
+            Locker.Tables.at(tableId)->RemoveReadLock(lock.Get());
+        }
+        for (const auto& tableId : lock->WriteTables) {
+            Locker.Tables.at(tableId)->RemoveWriteLock(lock.Get());
+        }
+        Locker.LocksWithRanges.Remove(lock.Get());
+        for (const auto& [other, _] : lock->ConflictLocks) {
+            other->ConflictLocks.erase(lock.Get());
+        }
+        lock->ReadTables.clear();
+        lock->WriteTables.clear();
+        lock->Points.clear();
+        lock->Ranges.clear();
+        lock->PersistentRanges.clear();
+        lock->UnpersistedRanges = false;
+        lock->ConflictLocks.clear();
+        lock->VolatileDependencies.clear();
+        lock->WriteSeqNumStates.clear();
+        lock->AncestorLocks.clear();
+        lock->Flags = flags & ~ELockFlags::TrackingOnly;
+        lock->SetTrackingOnly(true, nullptr);
+    });
+    lock.SetTrackingOnly(false, &db);
+}
+
 std::pair<TVector<TSysLocks::TLock>, TVector<ui64>> TSysLocks::ApplyLocks() {
     Y_ENSURE(Update);
 
@@ -1575,6 +1712,12 @@ std::pair<TVector<TSysLocks::TLock>, TVector<ui64>> TSysLocks::ApplyLocks() {
         } else if (lock->IsBroken()) {
             counter = TLock::ErrorBroken;
         } else {
+            // Validation and row reads have finished; promote together with the
+            // first real lock/WSN update, never while merely checking a request.
+            if (lock->IsTrackingOnly()) {
+                Y_ENSURE(Db);
+                ActivateLock(*lock, *Db);
+            }
             bool shardLock = (
                 lock->IsShardLock() ||
                 Locker.ForceShardLock(
@@ -1607,6 +1750,14 @@ std::pair<TVector<TSysLocks::TLock>, TVector<ui64>> TSysLocks::ApplyLocks() {
                         }
                     }
                 }
+            }
+            const bool hasCurrentLock = Update->WriteSeqNumUpdate
+                ? std::any_of(Update->WriteSeqNumUpdate->EchoLocks.begin(), Update->WriteSeqNumUpdate->EchoLocks.end(), [&](const auto& item) {
+                    return item.first.Owner == Self->TabletID();
+                })
+                : !Update->AffectedTables.Empty();
+            if (hasCurrentLock) {
+                lock->SetCurrentLock(Db);
             }
             counter = lock->GetCounter();
             Update->Lock = lock;
@@ -1789,7 +1940,7 @@ TSysLocks::TLock TSysLocks::GetLock(const TArrayRef<const TCell>& key) const {
 
     auto &checkVersion = Update->CheckVersion;
     TLockInfo::TPtr txLock = Locker.GetLock(lockTxId, checkVersion);
-    if (txLock) {
+    if (txLock && !txLock->IsTrackingOnly()) {
         if (key.size() == 2) { // locks v1
             const auto& tableIds = txLock->GetReadTables();
             Y_ENSURE(tableIds.size() == 1);
@@ -2090,6 +2241,16 @@ EEnsureCurrentLock TSysLocks::EnsureCurrentLock(bool createMissing) {
             return EEnsureCurrentLock::Broken;
         }
 
+        if (lock->IsTrackingOnly()) {
+            if (Update->LockNodeId != lock->GetLockNodeId()
+                    || !Db->MayActivateLock(Update->LockTxId)) {
+                return EEnsureCurrentLock::Abort;
+            }
+            if (!createMissing) {
+                return EEnsureCurrentLock::Missing;
+            }
+        }
+
         Update->Lock = lock;
 
         return EEnsureCurrentLock::Success;
@@ -2161,6 +2322,14 @@ bool TSysLocks::Load(ILocksDb& db) {
     Locker.Clear();
 
     for (auto& lockRow : rows) {
+        if (!!(ELockFlags(lockRow.Flags) & ELockFlags::TrackingOnly)) {
+            Y_ENSURE(lockRow.LockNodeId && lockRow.Ranges.empty()
+                && lockRow.ReadTables.empty() && lockRow.WriteTables.empty()
+                && lockRow.AncestorLocks.empty() && lockRow.WriteSeqNumStates.empty()
+                && lockRow.Conflicts.empty() && lockRow.VolatileDependencies.empty()
+                && !(ELockFlags(lockRow.Flags) & (ELockFlags::Current | ELockFlags::Frozen)),
+                "Invalid persistent TrackingOnly lock " << lockRow.LockId);
+        }
         lockRow.Flags |= ui64(ELockFlags::Persistent);
         TLockInfo::TPtr lock = Locker.AddLock(lockRow);
         for (auto& rangeRow : lockRow.Ranges) {
@@ -2196,7 +2365,7 @@ void TSysLocks::RestoreInMemoryLocks(THashMap<ui64, ILocksDb::TLockRow>&& rows) 
     for (auto& pr : rows) {
         auto& lockRow = pr.second;
         auto* lock = Locker.FindLockPtr(lockRow.LockId);
-        if (!lock) {
+        if (!lock || lock->IsTrackingOnly()) {
             // Skip locks that have not been restored
             continue;
         }
@@ -2206,7 +2375,7 @@ void TSysLocks::RestoreInMemoryLocks(THashMap<ui64, ILocksDb::TLockRow>&& rows) 
                 // lock is not persistent). Conflicts must be persistent when
                 // both locks are, otherwise such conflicts might be lost on
                 // restarts where in-memory migration fails.
-                if (!lock->IsPersistent() || !otherLock->IsPersistent()) {
+                if (!otherLock->IsTrackingOnly() && (!lock->IsPersistent() || !otherLock->IsPersistent())) {
                     lock->RestoreInMemoryConflict(otherLock);
                 }
             }
@@ -2247,18 +2416,85 @@ TRuntimeLockHolder TSysLocks::AddRuntimeLock(const TTableId& tableId, TConstArra
     return table->AddRuntimeLock(key, Update->Lock);
 }
 
-void TSysLocks::RestoreLockFromSplitSrc(ui64 srcTabletId, ILocksDb::TLockRow&& row, ILocksDb& locksDb) {
+bool TSysLocks::RestoreLockFromSplitSrc(ILocksDb::TLockRow&& row, ILocksDb& locksDb, TString* error) {
     Y_ENSURE(row.ReadTables.empty(), "Read locks are not supported");
-
-    // Create TLockInfo if needed
-    TLockInfo::TPtr lock = Locker.GetLock(row.LockId);
-    if (!lock) {
-        lock = Locker.AddLockToPersist(row.LockId, row.LockNodeId);
+    auto fail = [&](TString reason) {
+        if (error) {
+            *error = std::move(reason);
+        }
+        return false;
+    };
+    if (error) {
+        error->clear();
     }
 
+    auto lock = Locker.GetLock(row.LockId);
+    if (row.Counter == Max<ui64>()) {
+        // A failed transfer still has an ordinary persistent lock. Keep the
+        // owner even when the logical metadata was missing from the snapshot.
+        if (!lock) {
+            lock = Locker.AddLockToPersist(row.LockId, row.LockNodeId);
+            lock->PersistLock(&locksDb);
+        } else if (!lock->LockNodeId && row.LockNodeId) {
+            lock->LockNodeId = row.LockNodeId;
+            locksDb.PersistAddLock(row.LockId, lock->LockNodeId, lock->Generation,
+                lock->Counter, lock->CreationTime.MicroSeconds(), ui64(lock->Flags & ELockFlags::PersistentMask));
+            Locker.PendingSubscribeLocks.emplace_back(row.LockId, row.LockNodeId);
+        }
+        if (!lock->IsPersistent()) {
+            lock->PersistLock(&locksDb);
+        }
+        Locker.ForceBreakLock(row.LockId);
+        Locker.SaveBrokenPersistentLocks(&locksDb);
+        return true;
+    }
+    if (lock && lock->IsBroken()) {
+        return fail("Lock was already rejected");
+    }
+    if (lock && lock->GetLockNodeId() != row.LockNodeId) {
+        return fail("Different LockNodeId across sources");
+    }
+    const bool trackingOnly = !!(ELockFlags(row.Flags) & ELockFlags::TrackingOnly);
+    if (trackingOnly && (!row.LockNodeId || !row.AncestorLocks.empty()
+            || !row.WriteSeqNumStates.empty() || !row.WriteTables.empty()
+            || !row.Ranges.empty() || !row.Conflicts.empty() || !row.VolatileDependencies.empty()
+            || !!(ELockFlags(row.Flags) & (ELockFlags::Current | ELockFlags::Frozen)))) {
+        return fail("TrackingOnly requires an owner and no logical state");
+    }
+    // Validate every logical copy before publishing any of this source's state.
+    TVector<TAncestorLock> mergedAncestors;
+    mergedAncestors.reserve(row.AncestorLocks.size());
+    for (const auto& ancestor : row.AncestorLocks) {
+        if (!!(ancestor.Flags & ELockFlags::TrackingOnly)) {
+            return fail("Logical lock has the TrackingOnly flag");
+        }
+        if (lock) {
+            if (const auto* previous = lock->FindAncestorLock(ancestor.GetKey())) {
+                auto merged = *previous;
+                if (!merged.Merge(ancestor, error)) {
+                    return false;
+                }
+                mergedAncestors.push_back(std::move(merged));
+                continue;
+            }
+        }
+        mergedAncestors.push_back(ancestor);
+    }
+
+    if (!lock) {
+        lock = Locker.AddLockToPersist(row.LockId, row.LockNodeId);
+        lock->SetTrackingOnly(trackingOnly, &locksDb);
+    }
     if (!lock->IsPersistent()) {
         lock->PersistLock(&locksDb);
     }
+
+    // A tracking contribution must not downgrade logical locks from another
+    // source. A real contribution promotes the object without creating Current.
+    if (trackingOnly) {
+        return true;
+    }
+    ActivateLock(*lock, locksDb);
 
     for (const auto& pathId : row.WriteTables) {
         if (auto* table = Locker.FindTablePtr(TTableId(pathId))) {
@@ -2269,51 +2505,148 @@ void TSysLocks::RestoreLockFromSplitSrc(ui64 srcTabletId, ILocksDb::TLockRow&& r
     }
     lock->PersistRanges(&locksDb);
 
-    // Add ancestor entry for the src shard itself
-    {
-        TAncestorLock ancestorLock;
-        ancestorLock.TabletId = srcTabletId;
-        ancestorLock.CreatedOn = srcTabletId;
-        ancestorLock.Generation = row.Generation;
-        ancestorLock.Counter = row.Counter;
-        ancestorLock.CreationTime = TInstant::MicroSeconds(row.CreateTs);
-        ancestorLock.Flags = ELockFlags(row.Flags);
-        for (auto& state : row.WriteSeqNumStates) {
-            ui64 index = state.WriterIndex;
-            // The source's current path was implicit; preserve it as an explicit
-            // prefix before ancestor branches start advancing the aggregate maximum.
-            Y_ENSURE(state.Branches.empty());
-            state.Branches.push_back({{srcTabletId}, state.WriteSeqNum, state.SerializedResult});
-            locksDb.PersistAncestorLockWriteSeqNum(
-                row.LockId, ancestorLock.GetKey(),
-                state.WriterIndex, state.WriteSeqNum, state.SerializedResult);
-            locksDb.PersistAncestorLockBranch(row.LockId, ancestorLock.GetKey(), index, state.Branches.front());
-            ancestorLock.WriteSeqNumStates[index] = std::move(state);
+    for (size_t i = 0; i < row.AncestorLocks.size(); ++i) {
+        const auto& incoming = row.AncestorLocks[i];
+        auto& ancestor = mergedAncestors[i];
+        const auto* previous = lock->FindAncestorLock(ancestor.GetKey());
+        if (!previous) {
+            locksDb.PersistAddAncestorLock(row.LockId, ancestor);
         }
-
-        locksDb.PersistAddAncestorLock(row.LockId, ancestorLock);
-        lock->AddAncestorLock(std::move(ancestorLock));
-    }
-
-    // Add ancestor entries for grandparent shards (multi-hop split/merge)
-    for (auto& ancestorLock : row.AncestorLocks) {
-        locksDb.PersistAddAncestorLock(row.LockId, ancestorLock);
-        for (const auto& [_, state] : ancestorLock.WriteSeqNumStates) {
-            locksDb.PersistAncestorLockWriteSeqNum(
-                row.LockId, ancestorLock.GetKey(),
-                state.WriterIndex, state.WriteSeqNum, state.SerializedResult);
-            for (const auto& branch : state.Branches) {
-                locksDb.PersistAncestorLockBranch(row.LockId, ancestorLock.GetKey(), state.WriterIndex, branch);
+        for (const auto& [writer, state] : ancestor.WriteSeqNumStates) {
+            const auto* oldState = previous ? previous->WriteSeqNumStates.FindPtr(writer) : nullptr;
+            if (!oldState || oldState->WriteSeqNum != state.WriteSeqNum
+                    || oldState->SerializedResult != state.SerializedResult
+                    || oldState->GcWriteSeqNum != state.GcWriteSeqNum) {
+                locksDb.PersistAncestorLockWriteSeqNum(row.LockId, ancestor.GetKey(), writer,
+                    state.WriteSeqNum, state.SerializedResult, state.GcWriteSeqNum);
+            }
+            // Keep the full union in memory, but charge redo only for this
+            // source's new paths. Rewriting previous sources can exceed the
+            // commit limit even when every individual snapshot fits it.
+            const auto* incomingState = incoming.WriteSeqNumStates.FindPtr(writer);
+            if (!incomingState) {
+                continue;
+            }
+            TSet<TVector<ui64>> oldPaths;
+            if (oldState) {
+                for (const auto& branch : oldState->Branches) {
+                    oldPaths.insert(branch.ShardsPath);
+                }
+            }
+            for (const auto& branch : incomingState->Branches) {
+                if (!oldPaths.contains(branch.ShardsPath)) {
+                    locksDb.PersistAncestorLockBranch(row.LockId, ancestor.GetKey(), writer, branch);
+                }
             }
         }
-        lock->AddAncestorLock(std::move(ancestorLock));
+        lock->AddAncestorLock(std::move(ancestor));
     }
+    return true;
+}
+
+bool TSysLocks::CleanupLockFromSplit(ui64 lockId, ILocksDb& locksDb, const std::function<bool()>& mayContinue) {
+    auto lock = Locker.GetLock(lockId);
+    if (!lock) {
+        if (!mayContinue()) {
+            return false;
+        }
+        ILocksDb::TLockRow row{};
+        row.LockId = lockId;
+        row.Counter = Max<ui64>();
+        Y_ENSURE(RestoreLockFromSplitSrc(std::move(row), locksDb));
+        lock = Locker.GetLock(lockId);
+    }
+    Y_ENSURE(lock->IsPersistent());
+    // A reboot may see a partially removed subtree. Its broken parent
+    // makes it unusable until destination initialization finishes cleanup.
+    if (!lock->IsBroken()) {
+        if (!mayContinue()) {
+            return false;
+        }
+        Locker.ForceBreakLock(lockId);
+        Locker.SaveBrokenPersistentLocks(&locksDb);
+    }
+    while (!lock->VolatileDependencies.empty()) {
+        if (!mayContinue()) {
+            return false;
+        }
+        auto it = lock->VolatileDependencies.begin();
+        locksDb.PersistRemoveVolatileDependency(lockId, *it);
+        lock->VolatileDependencies.erase(it);
+    }
+    while (!lock->ConflictLocks.empty()) {
+        if (!mayContinue()) {
+            return false;
+        }
+        auto it = lock->ConflictLocks.begin();
+        auto* other = it->first;
+        if (other->IsPersistent() && !other->IsRemoved()) {
+            if (!!(it->second.Flags & ELockConflictFlags::BreakThemOnOurCommit)) {
+                locksDb.PersistRemoveConflict(lockId, other->LockId);
+            }
+            if (!!(it->second.Flags & ELockConflictFlags::BreakUsOnTheirCommit)) {
+                locksDb.PersistRemoveConflict(other->LockId, lockId);
+            }
+        }
+        other->ConflictLocks.erase(lock.Get());
+        lock->ConflictLocks.erase(it);
+    }
+    while (!lock->PersistentRanges.empty()) {
+        if (!mayContinue()) {
+            return false;
+        }
+        locksDb.PersistRemoveRange(lockId, lock->PersistentRanges.back().Id);
+        lock->PersistentRanges.pop_back();
+    }
+    while (!lock->WriteSeqNumStates.empty()) {
+        if (!mayContinue()) {
+            return false;
+        }
+        auto it = lock->WriteSeqNumStates.begin();
+        locksDb.PersistRemoveLockWriteSeqNum(lockId, it->first);
+        lock->WriteSeqNumStates.erase(it);
+    }
+    while (!lock->AncestorLocks.empty()) {
+        auto ancestor = lock->AncestorLocks.begin();
+        const auto key = ancestor->first;
+        auto& states = ancestor->second.WriteSeqNumStates;
+        while (!states.empty()) {
+            auto state = states.begin();
+            auto& branches = state->second.Branches;
+            while (!branches.empty()) {
+                if (!mayContinue()) {
+                    return false;
+                }
+                locksDb.PersistRemoveAncestorLockBranch(lockId, key, state->first, branches.back().ShardsPath);
+                branches.pop_back();
+            }
+            // Delete children before their aggregate/ancestor: Load must
+            // still be able to reconstruct the remaining rows on restart.
+            if (!mayContinue()) {
+                return false;
+            }
+            locksDb.PersistRemoveAncestorLockWriteSeqNum(lockId, key, state->first);
+            states.erase(state);
+        }
+        if (!mayContinue()) {
+            return false;
+        }
+        locksDb.PersistRemoveAncestorLock(lockId, key);
+        lock->AncestorLocks.erase(ancestor);
+    }
+    // Loaded broken locks may still have coarse table registrations.
+    Locker.CleanupPending.push_back(lockId);
+    Locker.RemoveBrokenRanges();
+    Locker.LocksWithRanges.Remove(lock.Get());
+    lock->ReadTables.clear();
+    lock->WriteTables.clear();
+    return true;
 }
 
 void TSysLocks::RestoreConflictFromSplitSrc(ui64 lockId, ui64 conflictId, ILocksDb& locksDb) {
     auto* lock = Locker.FindLockPtr(lockId);
     auto* otherLock = Locker.FindLockPtr(conflictId);
-    if (lock && otherLock) {
+    if (lock && otherLock && !lock->IsTrackingOnly() && !otherLock->IsTrackingOnly()) {
         lock->RestorePersistentConflict(otherLock);
         locksDb.PersistAddConflict(lockId, conflictId);
     }

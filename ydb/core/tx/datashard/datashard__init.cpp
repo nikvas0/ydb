@@ -188,6 +188,12 @@ void TDataShard::TTxInitRestored::Complete(const TActorContext& ctx) {
         if (!Self->SplitSrcSnapshotSender.AllAcked()) {
             Self->SplitSrcSnapshotSender.DoSend(ctx);
         }
+    } else if (Self->State == TShardState::SplitDstReceivingSnapshot && Self->ReceiveSnapshotsFrom.empty()) {
+        // ReceiveSnapshotsFrom contains sources whose snapshots are still missing;
+        // init subtracts durable SplitDstReceivedSnapshots from all source ids.
+        // An empty set means reception finished before reboot. Resume cleanup,
+        // since no further snapshot will arrive to trigger the transition to Ready.
+        Self->Execute(Self->CreateTxSplitLastSnapshotReceived(), ctx);
     } else if (Self->State == TShardState::Offline) {
         // Remind the schemeshard that this shard is in Offline state and can be deleted
         Self->ReportState(ctx, Self->State);
@@ -724,7 +730,12 @@ bool TDataShard::TTxInit::ReadEverything(TTransactionContext &txc) {
         }
     }
 
-    Self->SubscribeNewLocks();
+    // Owner notifications may remove locks while split cleanup still uses them.
+    // TTxSplitLastSnapshotReceived::Complete starts subscriptions after LoanTable
+    // and all cleanup batches commit, when it transitions the destination to Ready.
+    if (Self->State != TShardState::SplitDstReceivingSnapshot) {
+        Self->SubscribeNewLocks();
+    }
 
     Self->ScheduleRemoveAbandonedLockChanges();
     Self->ScheduleRemoveAbandonedSchemaSnapshots();
