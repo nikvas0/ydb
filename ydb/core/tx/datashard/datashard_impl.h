@@ -192,6 +192,7 @@ class TDataShard
     class TTxSplitSnapshotComplete;
     class TTxSplitReplicationSourceOffsets;
     class TTxSplitTransferSnapshot;
+    class TTxSplitLastSnapshotReceived;
     class TTxSplitTransferSnapshotAck;
     class TTxSplitPartitioningChanged;
     class TTxStoreTablePath;
@@ -1627,6 +1628,7 @@ class TDataShard
     NTabletFlatExecutor::ITransaction* CreateTxSyncSchemeOnFollower();
     NTabletFlatExecutor::ITransaction* CreateTxSchemaChanged(TEvDataShard::TEvSchemaChangedResult::TPtr& ev);
     NTabletFlatExecutor::ITransaction* CreateTxStartSplit();
+    NTabletFlatExecutor::ITransaction* CreateTxSplitLastSnapshotReceived();
     NTabletFlatExecutor::ITransaction* CreateTxSplitSnapshotComplete(TIntrusivePtr<TSplitSnapshotContext> snapContext);
     NTabletFlatExecutor::ITransaction* CreateTxSplitPartitioningChanged(THashMap<TActorId, THashSet<ui64>>&& waiters);
     NTabletFlatExecutor::ITransaction* CreateTxInitiateBorrowedPartsReturn();
