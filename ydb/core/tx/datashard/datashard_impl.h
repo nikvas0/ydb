@@ -228,6 +228,7 @@ class TDataShard
     class TTxRemoveLock;
     class TTxGetOpenTxs;
     class TTxRemoveLockChangeRecords;
+    class TTxAncestorGc;
     class TTxVolatileTxCommit;
     class TTxVolatileTxAbort;
     class TTxCdcStreamScanRun;
@@ -2187,6 +2188,7 @@ public:
     bool LoadLockChangeRecords(NIceDb::TNiceDb& db);
     bool LoadChangeRecordCommits(NIceDb::TNiceDb& db, TVector<IDataShardChangeCollector::TChange>& records);
     void ScheduleRemoveLockChanges(ui64 lockId);
+    void ScheduleAncestorGc(ILocksDb::TAncestorGcTask task);
     void ScheduleRemoveAbandonedLockChanges();
     void ScheduleRemoveSchemaSnapshot(const TSchemaSnapshotKey& key);
     void ScheduleRemoveAbandonedSchemaSnapshots();
@@ -3260,6 +3262,10 @@ private:
     THashMap<ui64, TUncommittedLockChangeRecords> LockChangeRecords; // ui64 is lock id
     THashMap<ui64, TCommittedLockChangeRecords> CommittedLockChangeRecords; // ui64 is lock id
     TVector<ui64> PendingLockChangeRecordsToRemove;
+    // Tasks to delete ancestor rows, including the task currently being processed.
+    // Keep each task until its last batch commits so a new lock cannot reuse the
+    // same LockId while GC can still delete rows under that ID.
+    TSet<ILocksDb::TAncestorGcTask> PendingAncestorGc;
     TVector<TSchemaSnapshotKey> PendingSchemaSnapshotsToGc;
 
     // in
